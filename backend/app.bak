@@ -1,0 +1,745 @@
+"""
+AD Manager Pro — FastAPI Backend
+=====================================
+Production-ready backend with LDAP3 integration for real Active Directory.
+
+This file connects the React frontend to a real Windows Active Directory
+domain via LDAPS/LDAP using the ldap3 library.
+
+Prerequisites:
+  1. Python 3.11+ installed
+  2. pip install -r requirements.txt
+  3. Configure config.ini with your AD settings
+  4. Run: python app.py  OR  uvicorn app:app --host 0.0.0.0 --port 8000
+
+NOTE: Run this on a Windows machine joined to your AD domain (or with
+      network access to your Domain Controllers).
+"""
+
+import os
+import json
+import logging
+from datetime import datetime, timedelta
+from typing import Optional, List
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Depends, status, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import StreamingResponse
+import uvicorn
+
+# ── LDAP3 Import ─────────────────────────────────────────────
+try:
+    from ldap3 import (
+        Server, Connection, ALL, NTLM, SIMPLE, SUBTREE,
+        MODIFY_REPLACE, MODIFY_ADD, MODIFY_DELETE,
+        ServerPool, ROUND_ROBIN, SAFE_SYNC, SYNC
+    )
+    from ldap3.core.exceptions import LDAPException, LDAPBindError
+    LDAP_AVAILABLE = True
+except ImportError:
+    LDAP_AVAILABLE = False
+    print("WARNING: ldap3 not installed. Running in mock mode.")
+
+# ── Database ─────────────────────────────────────────────────
+from sqlalchemy import create_engine, Column, String, DateTime, Integer, Boolean, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+
+# ── Auth ─────────────────────────────────────────────────────
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from dotenv import load_dotenv
+from pydantic import BaseModel
+
+# Load environment variables
+load_dotenv()
+
+# ─────────────────────────────────────────────────────────────
+# Configuration
+# ─────────────────────────────────────────────────────────────
+class Config:
+    # AD Settings (load from config.ini or environment)
+    AD_SERVER_PRIMARY   = os.getenv("AD_SERVER_PRIMARY", "192.168.1.10")
+    AD_SERVER_SECONDARY = os.getenv("AD_SERVER_SECONDARY", "192.168.1.11")
+    AD_DOMAIN           = os.getenv("AD_DOMAIN", "corp.local")
+    AD_BASE_DN          = os.getenv("AD_BASE_DN", "DC=corp,DC=local")
+    AD_SERVICE_ACCOUNT  = os.getenv("AD_SERVICE_ACCOUNT", "svc-admanager@corp.local")
+    AD_SERVICE_PASSWORD = os.getenv("AD_SERVICE_PASSWORD", "ServiceAccountP@ssw0rd!")
+    AD_USE_LDAPS        = os.getenv("AD_USE_LDAPS", "true").lower() == "true"
+    AD_PORT             = int(os.getenv("AD_PORT", "636" if AD_USE_LDAPS else "389"))
+
+    # JWT Settings
+    SECRET_KEY = os.getenv("SECRET_KEY", "your-super-secret-jwt-key-change-this-in-production!")
+    ALGORITHM  = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
+
+    # Database
+    DATABASE_URL = "sqlite:///./database/audit.db"
+
+config = Config()
+
+# ─────────────────────────────────────────────────────────────
+# Database Setup
+# ─────────────────────────────────────────────────────────────
+Base = declarative_base()
+
+class AuditLog(Base):
+    """Audit log table — records every operation"""
+    __tablename__ = "audit_logs"
+    id            = Column(Integer, primary_key=True, index=True)
+    timestamp     = Column(DateTime, default=datetime.utcnow)
+    operator      = Column(String(100))
+    operator_role = Column(String(20))
+    action        = Column(String(100))
+    object_type   = Column(String(50))
+    object_name   = Column(String(200))
+    details       = Column(Text)
+    status        = Column(String(20))
+    ip_address    = Column(String(50))
+
+class AppUser(Base):
+    """Application users with RBAC"""
+    __tablename__ = "app_users"
+    id           = Column(Integer, primary_key=True, index=True)
+    username     = Column(String(100), unique=True, index=True)
+    display_name = Column(String(200))
+    email        = Column(String(200))
+    role         = Column(String(20), default="Viewer")  # Admin, Helpdesk, Viewer
+    active       = Column(Boolean, default=True)
+    last_login   = Column(DateTime)
+
+# Create tables
+os.makedirs("database", exist_ok=True)
+engine = create_engine(config.DATABASE_URL, connect_args={"check_same_thread": False})
+Base.metadata.create_all(bind=engine)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# ─────────────────────────────────────────────────────────────
+# LDAP / Active Directory Service
+# ─────────────────────────────────────────────────────────────
+class ADService:
+    """
+    Active Directory LDAP Service
+    Handles all AD operations: users, groups, computers, OUs
+    """
+
+    def __init__(self):
+        self.base_dn = config.AD_BASE_DN
+        self._pool = None
+
+    def _get_server_pool(self) -> 'ServerPool':
+        """Create a server pool with failover support"""
+        servers = []
+        for addr in [config.AD_SERVER_PRIMARY, config.AD_SERVER_SECONDARY]:
+            if addr:
+                srv = Server(
+                    addr,
+                    port=config.AD_PORT,
+                    use_ssl=config.AD_USE_LDAPS,
+                    get_info=ALL
+                )
+                servers.append(srv)
+        return ServerPool(servers, ROUND_ROBIN, active=True, exhaust=True)
+
+    def _get_connection(self) -> 'Connection':
+        """Get an authenticated LDAP connection using service account"""
+        pool = self._get_server_pool()
+        conn = Connection(
+            pool,
+            user=config.AD_SERVICE_ACCOUNT,
+            password=config.AD_SERVICE_PASSWORD,
+            authentication=SIMPLE,
+            client_strategy=SAFE_SYNC,
+            auto_bind=True,
+            raise_exceptions=True,
+        )
+        return conn
+
+    def authenticate_user(self, username: str, password: str) -> Optional[dict]:
+        """
+        Authenticate a user against Active Directory.
+        Returns user info dict if successful, None otherwise.
+        """
+        try:
+            # Try UPN format first, then domain\\username
+            upn = f"{username}@{config.AD_DOMAIN}" if "@" not in username else username
+            server = Server(
+                config.AD_SERVER_PRIMARY,
+                port=config.AD_PORT,
+                use_ssl=config.AD_USE_LDAPS,
+                get_info=ALL
+            )
+            conn = Connection(
+                server,
+                user=upn,
+                password=password,
+                authentication=SIMPLE,
+                auto_bind=True
+            )
+            if conn.bound:
+                # Get user details
+                user_info = self.get_user(username.split("@")[0])
+                conn.unbind()
+                return user_info
+        except LDAPBindError:
+            return None
+        except LDAPException as e:
+            logging.error(f"LDAP auth error: {e}")
+            return None
+        return None
+
+    def get_users(self, base_dn: Optional[str] = None, search_filter: str = "(objectClass=user)") -> List[dict]:
+        """Fetch all users from Active Directory"""
+        with self._get_connection() as conn:
+            attributes = [
+                "sAMAccountName", "givenName", "sn", "displayName",
+                "userPrincipalName", "mail", "description", "physicalDeliveryOfficeName",
+                "telephoneNumber", "department", "title", "manager", "company",
+                "distinguishedName", "whenCreated", "whenChanged", "lastLogonTimestamp",
+                "pwdLastSet", "userAccountControl", "memberOf", "thumbnailPhoto",
+                "lockoutTime", "accountExpires",
+            ]
+            conn.search(
+                search_base=base_dn or self.base_dn,
+                search_filter=f"(&(objectClass=user)(objectCategory=person){search_filter})",
+                search_scope=SUBTREE,
+                attributes=attributes,
+                paged_size=1000,  # Handle large directories
+            )
+            users = []
+            for entry in conn.entries:
+                uac = int(entry.userAccountControl.value or 0)
+                is_disabled = bool(uac & 0x0002)
+                is_locked   = bool(entry.lockoutTime.value and int(entry.lockoutTime.value) > 0)
+                status = "locked" if is_locked else "disabled" if is_disabled else "active"
+
+                # Parse password expiry
+                pwd_last_set = entry.pwdLastSet.value
+                pw_expiry = None
+                if pwd_last_set:
+                    pw_expiry = (pwd_last_set + timedelta(days=90)).isoformat()
+
+                users.append({
+                    "id": str(entry.distinguishedName.value),
+                    "username": str(entry.sAMAccountName.value or ""),
+                    "firstName": str(entry.givenName.value or ""),
+                    "lastName": str(entry.sn.value or ""),
+                    "displayName": str(entry.displayName.value or ""),
+                    "upn": str(entry.userPrincipalName.value or ""),
+                    "email": str(entry.mail.value or ""),
+                    "description": str(entry.description.value or ""),
+                    "office": str(entry.physicalDeliveryOfficeName.value or ""),
+                    "phone": str(entry.telephoneNumber.value or ""),
+                    "department": str(entry.department.value or ""),
+                    "title": str(entry.title.value or ""),
+                    "manager": str(entry.manager.value or ""),
+                    "company": str(entry.company.value or ""),
+                    "ou": ",".join(str(entry.distinguishedName.value or "").split(",")[1:]),
+                    "groups": [str(g) for g in (entry.memberOf.values or [])],
+                    "status": status,
+                    "created": str(entry.whenCreated.value or ""),
+                    "modified": str(entry.whenChanged.value or ""),
+                    "lastLogon": str(entry.lastLogonTimestamp.value or ""),
+                    "passwordExpiry": pw_expiry or "",
+                    "passwordNeverExpires": bool(uac & 0x10000),
+                    "mustChangePassword": int(entry.pwdLastSet.value or -1) == 0,
+                })
+            return users
+
+    def create_user(self, data: dict) -> bool:
+        """Create a new user in Active Directory"""
+        with self._get_connection() as conn:
+            dn = f"CN={data['displayName']},{data['ou']}"
+            attributes = {
+                "objectClass": ["top", "person", "organizationalPerson", "user"],
+                "sAMAccountName": data["username"],
+                "givenName": data["firstName"],
+                "sn": data["lastName"],
+                "displayName": data["displayName"],
+                "userPrincipalName": data["upn"],
+                "mail": data["email"],
+                "department": data.get("department", ""),
+                "title": data.get("title", ""),
+                "company": data.get("company", ""),
+                "description": data.get("description", ""),
+                # Disabled + password not set (2 + 512 = 514)
+                "userAccountControl": 514,
+            }
+            result = conn.add(dn, attributes=attributes)
+            if result:
+                # Set password and enable account
+                password_value = f'"{data["password"]}"'.encode("utf-16-le")
+                conn.modify(dn, {"unicodePwd": [(MODIFY_REPLACE, [password_value])]})
+                # Enable account (512 = normal user account)
+                uac = 512
+                if data.get("passwordNeverExpires"):
+                    uac |= 0x10000
+                if data.get("mustChangePassword"):
+                    conn.modify(dn, {"pwdLastSet": [(MODIFY_REPLACE, [0])]})
+                conn.modify(dn, {"userAccountControl": [(MODIFY_REPLACE, [uac])]})
+            return result
+
+    def disable_user(self, username: str) -> bool:
+        """Disable a user account in AD"""
+        with self._get_connection() as conn:
+            user = self._find_user_dn(conn, username)
+            if not user:
+                return False
+            # Set userAccountControl bit 2 (disabled)
+            current_uac = int(user.userAccountControl.value or 512)
+            new_uac = current_uac | 0x0002  # Set ACCOUNTDISABLE bit
+            return conn.modify(user.distinguishedName.value, {
+                "userAccountControl": [(MODIFY_REPLACE, [new_uac])]
+            })
+
+    def enable_user(self, username: str) -> bool:
+        """Enable a user account"""
+        with self._get_connection() as conn:
+            user = self._find_user_dn(conn, username)
+            if not user:
+                return False
+            current_uac = int(user.userAccountControl.value or 514)
+            new_uac = current_uac & ~0x0002  # Clear ACCOUNTDISABLE bit
+            return conn.modify(user.distinguishedName.value, {
+                "userAccountControl": [(MODIFY_REPLACE, [new_uac])]
+            })
+
+    def unlock_user(self, username: str) -> bool:
+        """Unlock a locked-out user account"""
+        with self._get_connection() as conn:
+            user = self._find_user_dn(conn, username)
+            if not user:
+                return False
+            return conn.modify(user.distinguishedName.value, {
+                "lockoutTime": [(MODIFY_REPLACE, [0])]
+            })
+
+    def reset_password(self, username: str, new_password: str, force_change: bool = True) -> bool:
+        """Reset a user's AD password"""
+        with self._get_connection() as conn:
+            user = self._find_user_dn(conn, username)
+            if not user:
+                return False
+            dn = user.distinguishedName.value
+            password_value = f'"{new_password}"'.encode("utf-16-le")
+            result = conn.modify(dn, {"unicodePwd": [(MODIFY_REPLACE, [password_value])]})
+            if result and force_change:
+                conn.modify(dn, {"pwdLastSet": [(MODIFY_REPLACE, [0])]})
+            return result
+
+    def add_to_group(self, username: str, group_name: str) -> bool:
+        """Add a user to an AD security/distribution group"""
+        with self._get_connection() as conn:
+            user = self._find_user_dn(conn, username)
+            group = self._find_group_dn(conn, group_name)
+            if not user or not group:
+                return False
+            return conn.modify(group.distinguishedName.value, {
+                "member": [(MODIFY_ADD, [user.distinguishedName.value])]
+            })
+
+    def remove_from_group(self, username: str, group_name: str) -> bool:
+        """Remove a user from an AD group"""
+        with self._get_connection() as conn:
+            user = self._find_user_dn(conn, username)
+            group = self._find_group_dn(conn, group_name)
+            if not user or not group:
+                return False
+            return conn.modify(group.distinguishedName.value, {
+                "member": [(MODIFY_DELETE, [user.distinguishedName.value])]
+            })
+
+    def get_groups(self) -> List[dict]:
+        """Fetch all groups from AD"""
+        with self._get_connection() as conn:
+            conn.search(
+                search_base=self.base_dn,
+                search_filter="(objectClass=group)",
+                search_scope=SUBTREE,
+                attributes=["cn", "description", "groupType", "mail", "member", "memberOf", "distinguishedName", "whenCreated", "whenChanged"],
+            )
+            groups = []
+            for entry in conn.entries:
+                group_type_val = int(entry.groupType.value or 0)
+                is_security = bool(group_type_val & 0x80000000)
+                scope_map = {4: "domain-local", 2: "global", 8: "universal"}
+                scope = scope_map.get(group_type_val & 0xF, "global")
+                groups.append({
+                    "id": str(entry.distinguishedName.value),
+                    "name": str(entry.cn.value or ""),
+                    "description": str(entry.description.value or ""),
+                    "type": "security" if is_security else "distribution",
+                    "scope": scope,
+                    "email": str(entry.mail.value or ""),
+                    "members": [str(m) for m in (entry.member.values or [])],
+                    "memberOf": [str(g) for g in (entry.memberOf.values or [])],
+                    "ou": ",".join(str(entry.distinguishedName.value or "").split(",")[1:]),
+                    "created": str(entry.whenCreated.value or ""),
+                    "modified": str(entry.whenChanged.value or ""),
+                })
+            return groups
+
+    def get_computers(self) -> List[dict]:
+        """Fetch all computer accounts from AD"""
+        with self._get_connection() as conn:
+            conn.search(
+                search_base=self.base_dn,
+                search_filter="(objectClass=computer)",
+                search_scope=SUBTREE,
+                attributes=["cn", "dNSHostName", "operatingSystem", "operatingSystemVersion",
+                            "description", "distinguishedName", "lastLogonTimestamp",
+                            "whenCreated", "whenChanged", "userAccountControl", "managedBy"],
+            )
+            computers = []
+            for entry in conn.entries:
+                uac = int(entry.userAccountControl.value or 0)
+                is_disabled = bool(uac & 0x0002)
+                last_logon = entry.lastLogonTimestamp.value
+                days_inactive = (datetime.utcnow() - last_logon).days if last_logon else 999
+                status = "disabled" if is_disabled else ("inactive" if days_inactive > 90 else "active")
+                computers.append({
+                    "id": str(entry.distinguishedName.value),
+                    "name": str(entry.cn.value or ""),
+                    "dnsName": str(entry.dNSHostName.value or ""),
+                    "os": str(entry.operatingSystem.value or ""),
+                    "osVersion": str(entry.operatingSystemVersion.value or ""),
+                    "description": str(entry.description.value or ""),
+                    "ou": ",".join(str(entry.distinguishedName.value or "").split(",")[1:]),
+                    "status": status,
+                    "lastLogon": str(last_logon or ""),
+                    "created": str(entry.whenCreated.value or ""),
+                    "modified": str(entry.whenChanged.value or ""),
+                    "managedBy": str(entry.managedBy.value or ""),
+                })
+            return computers
+
+    def get_ou_tree(self) -> List[dict]:
+        """Fetch OU structure from AD"""
+        with self._get_connection() as conn:
+            conn.search(
+                search_base=self.base_dn,
+                search_filter="(objectClass=organizationalUnit)",
+                search_scope=SUBTREE,
+                attributes=["ou", "description", "distinguishedName"],
+            )
+            ous = []
+            for entry in conn.entries:
+                dn = str(entry.distinguishedName.value)
+                parent_dn = ",".join(dn.split(",")[1:])
+                ous.append({
+                    "id": dn,
+                    "name": str(entry.ou.value or ""),
+                    "dn": dn,
+                    "description": str(entry.description.value or ""),
+                    "parent": parent_dn if parent_dn != self.base_dn else None,
+                })
+            return ous
+
+    def _find_user_dn(self, conn, username: str):
+        """Helper: find user entry by sAMAccountName"""
+        conn.search(
+            search_base=self.base_dn,
+            search_filter=f"(&(objectClass=user)(sAMAccountName={username}))",
+            attributes=["distinguishedName", "userAccountControl", "pwdLastSet", "lockoutTime"],
+        )
+        return conn.entries[0] if conn.entries else None
+
+    def _find_group_dn(self, conn, group_name: str):
+        """Helper: find group entry by CN"""
+        conn.search(
+            search_base=self.base_dn,
+            search_filter=f"(&(objectClass=group)(cn={group_name}))",
+            attributes=["distinguishedName", "member"],
+        )
+        return conn.entries[0] if conn.entries else None
+
+
+# Instantiate AD service
+ad_service = ADService()
+
+# ─────────────────────────────────────────────────────────────
+# JWT Authentication
+# ─────────────────────────────────────────────────────────────
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    role: str
+    display_name: str
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=config.ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, config.SECRET_KEY, algorithm=config.ALGORITHM)
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, config.SECRET_KEY, algorithms=[config.ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    user = db.query(AppUser).filter(AppUser.username == username).first()
+    if user is None or not user.active:
+        raise credentials_exception
+    return user
+
+# ─────────────────────────────────────────────────────────────
+# Audit Logging
+# ─────────────────────────────────────────────────────────────
+def log_action(db: Session, operator: str, role: str, action: str,
+               object_type: str, object_name: str, details: str,
+               result_status: str, ip_address: str):
+    entry = AuditLog(
+        operator=operator, operator_role=role, action=action,
+        object_type=object_type, object_name=object_name,
+        details=details, status=result_status, ip_address=ip_address
+    )
+    db.add(entry)
+    db.commit()
+
+# ─────────────────────────────────────────────────────────────
+# FastAPI Application
+# ─────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logging.info("AD Manager Pro backend starting...")
+    yield
+    logging.info("AD Manager Pro backend shutting down.")
+
+app = FastAPI(
+    title="AD Manager Pro API",
+    description="Windows Active Directory Management REST API",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://localhost"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─────────────────────────────────────────────────────────────
+# AUTH ROUTES
+# ─────────────────────────────────────────────────────────────
+@app.post("/api/auth/login", response_model=Token)
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    request: Request = None,
+    db: Session = Depends(get_db)
+):
+    """Authenticate user against Active Directory via LDAP bind"""
+    ip = request.client.host if request else "unknown"
+
+    # Verify user has app access
+    app_user = db.query(AppUser).filter(AppUser.username == form_data.username).first()
+    if not app_user or not app_user.active:
+        log_action(db, form_data.username, "Unknown", "Login Failed", "System",
+                   form_data.username, "User not authorized in app", "Failed", ip)
+        raise HTTPException(status_code=401, detail="User not authorized to use this application")
+
+    # Authenticate against AD
+    ad_user = ad_service.authenticate_user(form_data.username, form_data.password)
+    if not ad_user:
+        log_action(db, form_data.username, app_user.role, "Login Failed",
+                   "System", form_data.username, "Invalid AD credentials", "Failed", ip)
+        raise HTTPException(status_code=401, detail="Invalid Active Directory credentials")
+
+    # Update last login
+    app_user.last_login = datetime.utcnow()
+    db.commit()
+
+    token = create_access_token({"sub": form_data.username, "role": app_user.role})
+    log_action(db, form_data.username, app_user.role, "User Login",
+               "System", form_data.username, "Successful login", "Success", ip)
+
+    return {"access_token": token, "token_type": "bearer", "role": app_user.role, "display_name": app_user.display_name}
+
+# ─────────────────────────────────────────────────────────────
+# USER ROUTES
+# ─────────────────────────────────────────────────────────────
+@app.get("/api/users")
+async def get_users(current_user: AppUser = Depends(get_current_user)):
+    """Get all AD users"""
+    return ad_service.get_users()
+
+@app.post("/api/users")
+async def create_user(user_data: dict, request: Request,
+                      current_user: AppUser = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """Create a new AD user account"""
+    if current_user.role not in ["Admin", "Helpdesk"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    result = ad_service.create_user(user_data)
+    status_str = "Success" if result else "Failed"
+    log_action(db, current_user.username, current_user.role, "User Created",
+               "User", user_data.get("username", ""), f"Created user {user_data.get('displayName')}", status_str, request.client.host)
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to create user in Active Directory")
+    return {"message": "User created successfully"}
+
+@app.post("/api/users/{username}/disable")
+async def disable_user(username: str, request: Request,
+                       current_user: AppUser = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    """Disable an AD user account"""
+    if current_user.role not in ["Admin", "Helpdesk"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    result = ad_service.disable_user(username)
+    log_action(db, current_user.username, current_user.role, "User Disabled",
+               "User", username, f"Disabled account {username}", "Success" if result else "Failed", request.client.host)
+    return {"success": result}
+
+@app.post("/api/users/{username}/enable")
+async def enable_user(username: str, request: Request,
+                      current_user: AppUser = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """Enable an AD user account"""
+    if current_user.role not in ["Admin", "Helpdesk"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    result = ad_service.enable_user(username)
+    log_action(db, current_user.username, current_user.role, "User Enabled",
+               "User", username, f"Enabled account {username}", "Success" if result else "Failed", request.client.host)
+    return {"success": result}
+
+@app.post("/api/users/{username}/unlock")
+async def unlock_user(username: str, request: Request,
+                      current_user: AppUser = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """Unlock a locked-out AD account"""
+    if current_user.role not in ["Admin", "Helpdesk"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    result = ad_service.unlock_user(username)
+    log_action(db, current_user.username, current_user.role, "Account Unlocked",
+               "User", username, f"Unlocked account {username}", "Success" if result else "Failed", request.client.host)
+    return {"success": result}
+
+@app.post("/api/users/{username}/reset-password")
+async def reset_password(username: str, payload: dict, request: Request,
+                         current_user: AppUser = Depends(get_current_user),
+                         db: Session = Depends(get_db)):
+    """Reset a user's AD password"""
+    if current_user.role not in ["Admin", "Helpdesk"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    new_password = payload.get("password")
+    force_change = payload.get("forceChange", True)
+    if not new_password or len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password does not meet requirements")
+    result = ad_service.reset_password(username, new_password, force_change)
+    log_action(db, current_user.username, current_user.role, "Password Reset",
+               "User", username, f"Password reset{' (force change)' if force_change else ''}", "Success" if result else "Failed", request.client.host)
+    return {"success": result}
+
+# ─────────────────────────────────────────────────────────────
+# GROUP ROUTES
+# ─────────────────────────────────────────────────────────────
+@app.get("/api/groups")
+async def get_groups(current_user: AppUser = Depends(get_current_user)):
+    """Get all AD groups"""
+    return ad_service.get_groups()
+
+@app.post("/api/groups/{group_name}/members/{username}")
+async def add_member(group_name: str, username: str, request: Request,
+                     current_user: AppUser = Depends(get_current_user),
+                     db: Session = Depends(get_db)):
+    """Add a user to a group"""
+    if current_user.role not in ["Admin", "Helpdesk"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    result = ad_service.add_to_group(username, group_name)
+    log_action(db, current_user.username, current_user.role, "Group Member Added",
+               "Group", group_name, f"Added {username} to {group_name}", "Success" if result else "Failed", request.client.host)
+    return {"success": result}
+
+@app.delete("/api/groups/{group_name}/members/{username}")
+async def remove_member(group_name: str, username: str, request: Request,
+                        current_user: AppUser = Depends(get_current_user),
+                        db: Session = Depends(get_db)):
+    """Remove a user from a group"""
+    if current_user.role not in ["Admin", "Helpdesk"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    result = ad_service.remove_from_group(username, group_name)
+    log_action(db, current_user.username, current_user.role, "Group Member Removed",
+               "Group", group_name, f"Removed {username} from {group_name}", "Success" if result else "Failed", request.client.host)
+    return {"success": result}
+
+# ─────────────────────────────────────────────────────────────
+# COMPUTER ROUTES
+# ─────────────────────────────────────────────────────────────
+@app.get("/api/computers")
+async def get_computers(current_user: AppUser = Depends(get_current_user)):
+    """Get all domain computers"""
+    return ad_service.get_computers()
+
+# ─────────────────────────────────────────────────────────────
+# OU ROUTES
+# ─────────────────────────────────────────────────────────────
+@app.get("/api/ous")
+async def get_ous(current_user: AppUser = Depends(get_current_user)):
+    """Get OU structure"""
+    return ad_service.get_ou_tree()
+
+# ─────────────────────────────────────────────────────────────
+# AUDIT LOG ROUTES
+# ─────────────────────────────────────────────────────────────
+@app.get("/api/audit-logs")
+async def get_audit_logs(
+    skip: int = 0, limit: int = 500,
+    current_user: AppUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get audit log entries"""
+    logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).offset(skip).limit(limit).all()
+    return [{"id": l.id, "timestamp": l.timestamp.isoformat(), "operator": l.operator,
+             "operatorRole": l.operator_role, "action": l.action, "objectType": l.object_type,
+             "objectName": l.object_name, "details": l.details, "status": l.status,
+             "ipAddress": l.ip_address} for l in logs]
+
+@app.get("/api/audit-logs/export")
+async def export_audit_logs(current_user: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Export audit logs as CSV"""
+    import csv, io
+    logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Timestamp", "Operator", "Role", "Action", "Object Type", "Object Name", "Details", "Status", "IP"])
+    for l in logs:
+        writer.writerow([l.timestamp.isoformat(), l.operator, l.operator_role, l.action,
+                         l.object_type, l.object_name, l.details, l.status, l.ip_address])
+    output.seek(0)
+    return StreamingResponse(output, media_type="text/csv",
+                             headers={"Content-Disposition": f"attachment; filename=audit-{datetime.now().date()}.csv"})
+
+# ─────────────────────────────────────────────────────────────
+# HEALTH CHECK
+# ─────────────────────────────────────────────────────────────
+@app.get("/api/health")
+async def health():
+    return {"status": "ok", "version": "1.0.0", "ldap": LDAP_AVAILABLE, "timestamp": datetime.utcnow().isoformat()}
+
+# ─────────────────────────────────────────────────────────────
+# Main entry
+# ─────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False,
+                ssl_certfile="certs/cert.pem", ssl_keyfile="certs/key.pem")
