@@ -1,5 +1,5 @@
 param(
-    [string]$InstallDir = "C:\Program Files\AD Manager Pro",
+    [string]$InstallDir = "C:\ADManagerPro",
     [switch]$Uninstall
 )
 
