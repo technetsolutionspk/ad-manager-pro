@@ -1,5 +1,5 @@
 param(
-    [string]$InstallDir = "C:\ADManagerPro",
+    [string]$InstallDir = "C:\Program Files\AD Manager Pro",
     [switch]$Uninstall
 )
 
@@ -44,7 +44,7 @@ function Read-Input([string]$Prompt, [string]$Default, [switch]$Required, [switc
         $val = $val.Trim()
         if ($val -eq "" -and $Default) { return $Default }
         if ($val -eq "" -and $Required) { Write-Fail "Required field"; continue }
-        if ($val -eq "") { return $Default }
+        if ($val -eq "") { return "" }
         return $val
     }
 }
@@ -59,6 +59,8 @@ function Find-Python {
     $tries = @("python","python3","C:\Python312\python.exe","C:\Python311\python.exe")
     $tries += "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
     $tries += "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+    $tries += "$env:ProgramFiles\Python312\python.exe"
+    $tries += "$env:ProgramFiles\Python311\python.exe"
     foreach ($p in $tries) {
         try {
             $o = & $p --version 2>&1
@@ -85,8 +87,10 @@ function Refresh-Path {
 
 function Add-FW([string]$Name, [int]$Port) {
     try { & netsh advfirewall firewall delete rule name="$Name" 2>&1 | Out-Null } catch {}
-    try { & netsh advfirewall firewall add rule name="$Name" dir=in action=allow protocol=TCP localport=$Port profile=domain,private 2>&1 | Out-Null; return $true } catch {}
-    return $false
+    try {
+        & netsh advfirewall firewall add rule name="$Name" dir=in action=allow protocol=TCP localport=$Port profile=domain,private 2>&1 | Out-Null
+        return $true
+    } catch { return $false }
 }
 
 function Remove-FW([string]$Name) {
@@ -95,8 +99,10 @@ function Remove-FW([string]$Name) {
 
 function Create-Task([string]$Name, [string]$Bat, [string]$Desc) {
     try { & schtasks /delete /tn $Name /f 2>&1 | Out-Null } catch {}
-    try { & schtasks /create /tn $Name /tr "`"$Bat`"" /sc onstart /ru SYSTEM /rl highest /f 2>&1 | Out-Null; return $true } catch {}
-    return $false
+    try {
+        & schtasks /create /tn $Name /tr "`"$Bat`"" /sc onstart /ru SYSTEM /rl highest /f 2>&1 | Out-Null
+        return $true
+    } catch { return $false }
 }
 
 function Remove-Task([string]$Name) {
@@ -126,7 +132,9 @@ function Get-IPs {
     return $ips
 }
 
+# ================================================================
 # UNINSTALL
+# ================================================================
 if ($Uninstall) {
     Clear-Host
     Write-Host ""
@@ -170,7 +178,9 @@ if ($Uninstall) {
     exit 0
 }
 
+# ================================================================
 # INSTALL
+# ================================================================
 Clear-Host
 Write-Host ""
 Write-Host "  ============================================" -ForegroundColor Cyan
@@ -191,7 +201,7 @@ Write-Host ""
 Write-Host "  This installer will:" -ForegroundColor White
 Write-Host "    1. Install Python 3.12 if needed"
 Write-Host "    2. Install Node.js 20 if needed"
-Write-Host "    3. Install AD Manager Pro"
+Write-Host "    3. Setup AD Manager Pro application"
 Write-Host "    4. Configure AD settings"
 Write-Host "    5. Build web frontend"
 Write-Host "    6. Create Windows service"
@@ -203,7 +213,7 @@ Write-Host ""
 
 $InstallDir = Read-Input -Prompt "Install directory" -Default $InstallDir
 
-# STEP 1: AD Config
+# ── AD Config ──
 Write-Host ""
 Write-Host "  -- STEP 1: AD Configuration --" -ForegroundColor Cyan
 
@@ -224,7 +234,7 @@ $useLdaps = Read-Input -Prompt "Use LDAPS (true/false)" -Default "true"
 $adPort = "389"
 if ($useLdaps -eq "true") { $adPort = "636" }
 
-# STEP 2: Admin User
+# ── Admin User ──
 Write-Host ""
 Write-Host "  -- STEP 2: First Admin User --" -ForegroundColor Cyan
 Write-Info "Must have a valid AD account"
@@ -233,7 +243,7 @@ $adminUser = Read-Input -Prompt "AD username" -Required
 $adminName = Read-Input -Prompt "Display name" -Default $adminUser
 $adminEmail = Read-Input -Prompt "Email" -Default "$adminUser@$adDomain"
 
-# Summary
+# ── Summary ──
 Write-Host ""
 Write-Host "  -- Summary --" -ForegroundColor Cyan
 Write-Info "Install Dir : $InstallDir"
@@ -249,7 +259,9 @@ Write-Host ""
 $go = Read-Input -Prompt "Proceed with install (yes/no)" -Default "yes"
 if ($go -ne "yes") { Write-Info "Cancelled"; exit 0 }
 
+# ================================================================
 # STEP 3: Prerequisites
+# ================================================================
 Write-Host ""
 Write-Host "  -- STEP 3: Prerequisites --" -ForegroundColor Cyan
 
@@ -276,7 +288,7 @@ if (-not $pythonCmd) {
         Write-OK "Python installed"
         Refresh-Path
         Start-Sleep -Seconds 2
-        Remove-Item $pyInst -Force -ErrorAction SilentlyContinue
+        try { Remove-Item $pyInst -Force } catch {}
     }
     $pythonCmd = Find-Python
     if (-not $pythonCmd) {
@@ -310,7 +322,7 @@ if (-not $nodeCmd) {
         Write-OK "Node.js installed"
         Refresh-Path
         Start-Sleep -Seconds 2
-        Remove-Item $ndInst -Force -ErrorAction SilentlyContinue
+        try { Remove-Item $ndInst -Force } catch {}
     }
     $nodeCmd = Find-Node
     if (-not $nodeCmd) {
@@ -323,10 +335,17 @@ $ndV = & $nodeCmd --version 2>&1
 Write-OK "Node.js: $ndV"
 
 Write-Step "3.3" "Checking npm..."
-try { $npmV = & npm --version 2>&1; Write-OK "npm: v$npmV" }
-catch { Write-Fail "npm not found"; exit 1 }
+try {
+    $npmV = & npm --version 2>&1
+    Write-OK "npm: v$npmV"
+} catch {
+    Write-Fail "npm not found"
+    exit 1
+}
 
+# ================================================================
 # STEP 4: Directories
+# ================================================================
 Write-Host ""
 Write-Host "  -- STEP 4: Creating Directories --" -ForegroundColor Cyan
 
@@ -344,7 +363,9 @@ foreach ($d in $dirs) {
 }
 Write-OK "Directories created"
 
+# ================================================================
 # STEP 5: Copy Files
+# ================================================================
 Write-Host ""
 Write-Host "  -- STEP 5: Copying Files --" -ForegroundColor Cyan
 
@@ -359,33 +380,53 @@ if (-not (Test-Path (Join-Path $bSrc "app.py"))) {
     exit 1
 }
 
-$skipDirs = @("venv","__pycache__","database","logs","static","certs")
-$skipFiles = @(".env")
-$items = Get-ChildItem -Path $bSrc
-foreach ($item in $items) {
-    $skip = $false
-    foreach ($s in $skipDirs) { if ($item.Name -eq $s) { $skip = $true } }
-    foreach ($s in $skipFiles) { if ($item.Name -eq $s) { $skip = $true } }
-    if (-not $skip) { Copy-Item -Path $item.FullName -Destination $backendDir -Recurse -Force }
-}
-Write-OK "Backend files copied"
-
 if (-not (Test-Path (Join-Path $fSrc "package.json"))) {
     Write-Fail "Frontend source not found at $fSrc"
     Read-Host "  Press Enter to exit"
     exit 1
 }
 
-$skipDirs2 = @("node_modules","dist",".vite")
-$items2 = Get-ChildItem -Path $fSrc
-foreach ($item in $items2) {
-    $skip = $false
-    foreach ($s in $skipDirs2) { if ($item.Name -eq $s) { $skip = $true } }
-    if (-not $skip) { Copy-Item -Path $item.FullName -Destination $frontendDir -Recurse -Force }
-}
-Write-OK "Frontend files copied"
+# Check if source and destination are the same
+$bSrcNorm = $bSrc.ToLower().TrimEnd('\')
+$bDstNorm = $backendDir.ToLower().TrimEnd('\')
+$fSrcNorm = $fSrc.ToLower().TrimEnd('\')
+$fDstNorm = $frontendDir.ToLower().TrimEnd('\')
 
+if ($bSrcNorm -ne $bDstNorm) {
+    $skipDirs = @("venv","__pycache__","database","logs","static","certs")
+    $skipFiles = @(".env")
+    $items = Get-ChildItem -Path $bSrc
+    foreach ($item in $items) {
+        $skip = $false
+        foreach ($s in $skipDirs) { if ($item.Name -eq $s) { $skip = $true } }
+        foreach ($s in $skipFiles) { if ($item.Name -eq $s) { $skip = $true } }
+        if (-not $skip) {
+            try { Copy-Item -Path $item.FullName -Destination $backendDir -Recurse -Force } catch {}
+        }
+    }
+    Write-OK "Backend files copied"
+} else {
+    Write-OK "Backend files already in place (running from source)"
+}
+
+if ($fSrcNorm -ne $fDstNorm) {
+    $skipDirs2 = @("node_modules","dist",".vite")
+    $items2 = Get-ChildItem -Path $fSrc
+    foreach ($item in $items2) {
+        $skip = $false
+        foreach ($s in $skipDirs2) { if ($item.Name -eq $s) { $skip = $true } }
+        if (-not $skip) {
+            try { Copy-Item -Path $item.FullName -Destination $frontendDir -Recurse -Force } catch {}
+        }
+    }
+    Write-OK "Frontend files copied"
+} else {
+    Write-OK "Frontend files already in place (running from source)"
+}
+
+# ================================================================
 # STEP 6: Configuration
+# ================================================================
 Write-Host ""
 Write-Host "  -- STEP 6: Configuration --" -ForegroundColor Cyan
 
@@ -393,7 +434,8 @@ Write-Step "6.1" "Generating secret key..."
 $secretKey = ""
 try {
     $secretKey = & $pythonCmd -c "import secrets; print(secrets.token_hex(64))" 2>&1
-    if (-not $secretKey) { throw "empty" }
+    $secretKey = [string]$secretKey
+    if (-not $secretKey -or $secretKey.Length -lt 32) { throw "bad key" }
 } catch {
     $g1 = [System.Guid]::NewGuid().ToString("N")
     $g2 = [System.Guid]::NewGuid().ToString("N")
@@ -419,34 +461,42 @@ $envLines += "APP_HOST=0.0.0.0"
 $envLines += "APP_PORT=$AppPort"
 
 $envFile = Join-Path $backendDir ".env"
-$envLines | Out-File -FilePath $envFile -Encoding ASCII
+[System.IO.File]::WriteAllLines($envFile, $envLines)
 Write-OK "Configuration saved"
 
+# ================================================================
 # STEP 7: Python Environment
+# ================================================================
 Write-Host ""
 Write-Host "  -- STEP 7: Python Environment --" -ForegroundColor Cyan
 
 $savedLoc = Get-Location
 Set-Location $backendDir
 
-Write-Step "7.1" "Creating virtual environment..."
-& $pythonCmd -m venv venv 2>&1 | Out-Null
-Write-OK "Virtual environment created"
+$venvPath = Join-Path $backendDir "venv"
+
+if (-not (Test-Path (Join-Path $venvPath "Scripts\python.exe"))) {
+    Write-Step "7.1" "Creating virtual environment..."
+    & $pythonCmd -m venv venv 2>&1 | Out-Null
+    Write-OK "Virtual environment created"
+} else {
+    Write-OK "Virtual environment already exists"
+}
 
 Write-Step "7.2" "Installing packages (2-3 min)..."
 $pipExe = Join-Path $backendDir "venv\Scripts\pip.exe"
 $pythonExe = Join-Path $backendDir "venv\Scripts\python.exe"
 $reqFile = Join-Path $backendDir "requirements.txt"
 
-$ErrorActionPreference = "Continue"
-try { & $pipExe install --upgrade pip --quiet 2>&1 | Out-Null } catch {}
-try { & $pipExe install -r $reqFile --quiet 2>&1 | Out-Null } catch {}
-$ErrorActionPreference = "Stop"
+& $pipExe install --upgrade pip --quiet 2>&1 | Out-Null
+& $pipExe install -r $reqFile --quiet 2>&1 | Out-Null
 Write-OK "Packages installed"
 
 Set-Location $savedLoc
 
+# ================================================================
 # STEP 8: Build Frontend
+# ================================================================
 Write-Host ""
 Write-Host "  -- STEP 8: Building Frontend --" -ForegroundColor Cyan
 
@@ -454,80 +504,155 @@ $savedLoc = Get-Location
 Set-Location $frontendDir
 
 Write-Step "8.1" "Configuring..."
-"VITE_API_URL=" | Out-File -FilePath (Join-Path $frontendDir ".env.production") -Encoding ASCII
+$envProdFile = Join-Path $frontendDir ".env.production"
+[System.IO.File]::WriteAllText($envProdFile, "VITE_API_URL=")
 Write-OK "Configured"
 
-Write-Step "8.2" "Installing npm packages (3-5 min)..."
-$ErrorActionPreference = "Continue"
-& npm install --silent 2>&1 | Out-Null
-$ErrorActionPreference = "Stop"
-Write-OK "npm packages installed"
+$nmPath = Join-Path $frontendDir "node_modules"
+if (-not (Test-Path $nmPath)) {
+    Write-Step "8.2" "Installing npm packages (3-5 min)..."
+    & npm install 2>&1 | Out-Null
+    Write-OK "npm packages installed"
+} else {
+    Write-OK "npm packages already installed"
+}
 
 Write-Step "8.3" "Building production frontend..."
-$ErrorActionPreference = "Continue"
 & npm run build 2>&1 | Out-Null
-$ErrorActionPreference = "Stop"
-Write-OK "Frontend built"
-if ($LASTEXITCODE -eq 0) { Write-OK "Frontend built" }
-else { Write-Fail "Build failed - app may not have UI" }
+
+$distDir = Join-Path $frontendDir "dist"
+$distIndex = Join-Path $distDir "index.html"
+
+if (Test-Path $distIndex) {
+    Write-OK "Frontend built successfully"
+} else {
+    Write-Fail "Frontend build may have failed"
+    Write-Info "Check if Node.js and npm are working correctly"
+}
 
 Set-Location $savedLoc
 
-$distDir = Join-Path $frontendDir "dist"
+# Deploy to backend static
 $staticDir = Join-Path $backendDir "static"
 if (Test-Path $distDir) {
+    # Clear old static files first
+    try { Get-ChildItem $staticDir | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue } catch {}
     Copy-Item -Path (Join-Path $distDir "*") -Destination $staticDir -Recurse -Force
-    Write-OK "Frontend deployed"
+    Write-OK "Frontend deployed to backend"
+} else {
+    Write-Fail "No dist folder - frontend not deployed"
 }
 
+# Verify
+$staticIndex = Join-Path $staticDir "index.html"
+if (Test-Path $staticIndex) {
+    Write-OK "Verified: index.html present in static folder"
+} else {
+    Write-Fail "Warning: index.html NOT found in static folder"
+    Write-Info "The API will work but there will be no web UI"
+}
+
+# ================================================================
 # STEP 9: Admin User
+# ================================================================
 Write-Host ""
 Write-Host "  -- STEP 9: Creating Admin User --" -ForegroundColor Cyan
 
-$pyScript = "import sys; sys.path.insert(0,r'$backendDir')"
-$pyScript += "`nfrom app import AppUser, SessionLocal"
-$pyScript += "`ndb = SessionLocal()"
-$pyScript += "`nex = db.query(AppUser).filter(AppUser.username=='$adminUser').first()"
-$pyScript += "`nif not ex:"
-$pyScript += "`n    db.add(AppUser(username='$adminUser',display_name='$adminName',email='$adminEmail',role='Admin',active=True))"
-$pyScript += "`n    db.commit(); print('CREATED')"
-$pyScript += "`nelse: print('EXISTS')"
-$pyScript += "`ndb.close()"
-
 $savedLoc = Get-Location
 Set-Location $backendDir
+
+# Write Python script to temp file to avoid encoding issues
+$tmpPy = Join-Path $env:TEMP "adm_setup_user.py"
+
+$pyLines = @()
+$pyLines += "import sys"
+$pyLines += "sys.path.insert(0, r'" + $backendDir + "')"
+$pyLines += "try:"
+$pyLines += "    from app import AppUser, SessionLocal"
+$pyLines += "    db = SessionLocal()"
+$pyLines += "    ex = db.query(AppUser).filter(AppUser.username == '" + $adminUser + "').first()"
+$pyLines += "    if not ex:"
+$pyLines += "        u = AppUser()"
+$pyLines += "        u.username = '" + $adminUser + "'"
+$pyLines += "        u.display_name = '" + $adminName + "'"
+$pyLines += "        u.email = '" + $adminEmail + "'"
+$pyLines += "        u.role = 'Admin'"
+$pyLines += "        u.active = True"
+$pyLines += "        db.add(u)"
+$pyLines += "        db.commit()"
+$pyLines += "        print('CREATED')"
+$pyLines += "    else:"
+$pyLines += "        print('EXISTS')"
+$pyLines += "    db.close()"
+$pyLines += "except Exception as e:"
+$pyLines += "    print('ERROR: ' + str(e))"
+
+[System.IO.File]::WriteAllLines($tmpPy, $pyLines)
+
 try {
-    $r = & $pythonExe -c $pyScript 2>&1
+    $r = & $pythonExe $tmpPy 2>&1
     $rs = [string]$r
-    if ($rs -match "CREATED") { Write-OK "Admin user '$adminUser' created" }
-    elseif ($rs -match "EXISTS") { Write-OK "Admin user '$adminUser' exists" }
-    else { Write-Fail "Could not create admin: $rs" }
-} catch { Write-Fail "Admin creation failed: $_" }
+    if ($rs -match "CREATED") {
+        Write-OK "Admin user '$adminUser' created"
+    } elseif ($rs -match "EXISTS") {
+        Write-OK "Admin user '$adminUser' already exists"
+    } else {
+        Write-Fail "Could not create admin: $rs"
+        Write-Info "Create manually after install:"
+        Write-Host "    cd `"$backendDir`"" -ForegroundColor Gray
+        Write-Host "    .\venv\Scripts\python.exe -c `"from app import AppUser, SessionLocal; db = SessionLocal(); db.add(AppUser(username='$adminUser', display_name='$adminName', email='$adminEmail', role='Admin', active=True)); db.commit(); print('OK'); db.close()`"" -ForegroundColor Gray
+    }
+} catch {
+    Write-Fail "Admin creation error: $_"
+    Write-Info "Create manually after install"
+}
+
+try { Remove-Item $tmpPy -Force } catch {}
 Set-Location $savedLoc
 
+# ================================================================
 # STEP 10: Start Scripts
+# ================================================================
 Write-Host ""
 Write-Host "  -- STEP 10: Creating Scripts --" -ForegroundColor Cyan
 
-$prodBat = "@echo off`r`ntitle AD Manager Pro - Production`r`ncd /d `"$backendDir`"`r`n"
-$prodBat += "if not exist `"venv\Scripts\python.exe`" (echo ERROR: No venv & exit /b 1)`r`n"
-$prodBat += "if not exist `"app.py`" (echo ERROR: No app.py & exit /b 1)`r`n"
-$prodBat += "if not exist `".env`" (echo ERROR: No .env & exit /b 1)`r`n"
-$prodBat += "venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port $AppPort --workers 4 --log-level info >> logs\service.log 2>&1"
+# Production script
+$prodLines = @()
+$prodLines += "@echo off"
+$prodLines += "title AD Manager Pro - Production"
+$prodLines += "cd /d `"$backendDir`""
+$prodLines += "if not exist `"venv\Scripts\python.exe`" (echo ERROR: No venv & exit /b 1)"
+$prodLines += "if not exist `"app.py`" (echo ERROR: No app.py & exit /b 1)"
+$prodLines += "if not exist `".env`" (echo ERROR: No .env & exit /b 1)"
+$prodLines += "venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port $AppPort --workers 4 --log-level info >> logs\service.log 2>&1"
 
-[System.IO.File]::WriteAllText((Join-Path $backendDir "start_production.bat"), $prodBat)
+$prodFile = Join-Path $backendDir "start_production.bat"
+[System.IO.File]::WriteAllLines($prodFile, $prodLines)
 
-$devBat = "@echo off`r`ntitle AD Manager Pro - Development`r`ncd /d `"$backendDir`"`r`n"
-$devBat += "if not exist `"venv\Scripts\activate.bat`" (echo ERROR: No venv & pause & exit /b 1)`r`n"
-$devBat += "echo.`r`necho  AD Manager Pro - Development`r`necho  URL: http://localhost:$AppPort`r`necho  Press CTRL+C to stop`r`necho.`r`n"
-$devBat += "call venv\Scripts\activate.bat`r`n"
-$devBat += "python -m uvicorn app:app --host 0.0.0.0 --port $AppPort --reload --log-level info`r`npause"
+# Dev script
+$devLines = @()
+$devLines += "@echo off"
+$devLines += "title AD Manager Pro - Development"
+$devLines += "cd /d `"$backendDir`""
+$devLines += "if not exist `"venv\Scripts\activate.bat`" (echo ERROR: No venv & pause & exit /b 1)"
+$devLines += "echo."
+$devLines += "echo  AD Manager Pro - Development Server"
+$devLines += "echo  URL: http://localhost:$AppPort"
+$devLines += "echo  API: http://localhost:$AppPort/docs"
+$devLines += "echo  Press CTRL+C to stop"
+$devLines += "echo."
+$devLines += "call venv\Scripts\activate.bat"
+$devLines += "python -m uvicorn app:app --host 0.0.0.0 --port $AppPort --reload --log-level info"
+$devLines += "pause"
 
-[System.IO.File]::WriteAllText((Join-Path $backendDir "start.bat"), $devBat)
+$devFile = Join-Path $backendDir "start.bat"
+[System.IO.File]::WriteAllLines($devFile, $devLines)
 
 Write-OK "Scripts created"
 
+# ================================================================
 # STEP 11: Windows Service
+# ================================================================
 Write-Host ""
 Write-Host "  -- STEP 11: Windows Service --" -ForegroundColor Cyan
 
@@ -538,19 +663,26 @@ try { Get-Process | Where-Object { $_.ProcessName -like "*python*" } | Stop-Proc
 Start-Sleep -Seconds 2
 
 $batPath = Join-Path $backendDir "start_production.bat"
-$ok = Create-Task -Name "AD Manager Pro" -Bat $batPath -Desc "AD Manager Pro HTTP Service (Port $AppPort)"
+$ok = Create-Task -Name "AD Manager Pro" -Bat $batPath -Desc "AD Manager Pro HTTP Service"
 if ($ok) { Write-OK "Service created (auto-starts on boot)" }
 else { Write-Fail "Could not create service. Start manually: $batPath" }
 
+# ================================================================
 # STEP 12: Firewall
+# ================================================================
 Write-Host ""
 Write-Host "  -- STEP 12: Firewall --" -ForegroundColor Cyan
+
+Remove-FW "AD Manager Pro HTTPS"
+Remove-FW "AD Manager Pro HTTP"
 
 $fwOk = Add-FW -Name "AD Manager Pro" -Port ([int]$AppPort)
 if ($fwOk) { Write-OK "Firewall rule: TCP port $AppPort" }
 else { Write-Fail "Could not create rule. Allow port $AppPort manually." }
 
-# STEP 13: Start
+# ================================================================
+# STEP 13: Start Application
+# ================================================================
 Write-Host ""
 Write-Host "  -- STEP 13: Starting Application --" -ForegroundColor Cyan
 
@@ -570,13 +702,24 @@ for ($i = 1; $i -le 30; $i++) {
 }
 Write-Host ""
 
-if ($started) { Write-OK "Application is running!" }
-else { Write-Info "May still be starting. Try http://localhost:${AppPort}" }
+if ($started) { Write-OK "Application is running and healthy!" }
+else {
+    Write-Info "Application may still be starting..."
+    Write-Info "Try opening http://localhost:${AppPort} in a browser"
+    Write-Info "Check logs: type `"$backendDir\logs\service.log`""
+}
 
-# Copy for uninstall
-try { Copy-Item $MyInvocation.MyCommand.Path (Join-Path $InstallDir "uninstall.ps1") -Force } catch {}
+# ================================================================
+# Copy installer for future uninstall
+# ================================================================
+try {
+    $uninstFile = Join-Path $InstallDir "uninstall.ps1"
+    Copy-Item $MyInvocation.MyCommand.Path $uninstFile -Force
+} catch {}
 
+# ================================================================
 # DONE
+# ================================================================
 $hn = $env:COMPUTERNAME
 $ips = Get-IPs
 
@@ -586,16 +729,16 @@ Write-Host "   Installation Complete!" -ForegroundColor Green
 Write-Host "  ============================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Access URLs:" -ForegroundColor Cyan
-Write-Host "    http://${hn}:$AppPort"
+Write-Host "    http://${hn}:$AppPort" -ForegroundColor White
 foreach ($ip in $ips) { Write-Host "    http://${ip}:$AppPort" -ForegroundColor Gray }
 Write-Host "    http://localhost:$AppPort" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Login:" -ForegroundColor Cyan
-Write-Host "    Username: $adminUser"
-Write-Host "    Password: Your AD password"
+Write-Host "    Username: $adminUser" -ForegroundColor White
+Write-Host "    Password: Your AD password" -ForegroundColor White
 Write-Host ""
 Write-Host "  Install Path:" -ForegroundColor Cyan
-Write-Host "    $InstallDir"
+Write-Host "    $InstallDir" -ForegroundColor White
 Write-Host ""
 Write-Host "  Commands:" -ForegroundColor Cyan
 Write-Host "    Start : schtasks /run /tn `"AD Manager Pro`"" -ForegroundColor Gray
@@ -605,6 +748,7 @@ Write-Host ""
 Write-Host "  Uninstall:" -ForegroundColor Cyan
 Write-Host "    powershell -ExecutionPolicy Bypass -File `"$InstallDir\uninstall.ps1`" -Uninstall" -ForegroundColor Gray
 Write-Host ""
-Write-Host "  API Docs: http://${hn}:$AppPort/docs" -ForegroundColor Gray
+Write-Host "  API Docs:" -ForegroundColor Cyan
+Write-Host "    http://${hn}:$AppPort/docs" -ForegroundColor Gray
 Write-Host ""
 Read-Host "  Press Enter to finish"

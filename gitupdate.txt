@@ -1,4 +1,4 @@
 cd "C:\AD Pro\public"
 git add .
-git commit -m "ssl cert removed"
+git commit -m "install script"
 git push
