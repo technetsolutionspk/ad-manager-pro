@@ -1,4 +1,4 @@
 cd "C:\AD Pro\public"
 git add .
-git commit -m "Description of what changed"
+git commit -m "ssl cert removed"
 git push
