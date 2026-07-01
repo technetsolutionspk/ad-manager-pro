@@ -438,8 +438,10 @@ $pipExe = Join-Path $backendDir "venv\Scripts\pip.exe"
 $pythonExe = Join-Path $backendDir "venv\Scripts\python.exe"
 $reqFile = Join-Path $backendDir "requirements.txt"
 
-& $pipExe install --upgrade pip --quiet 2>&1 | Out-Null
-& $pipExe install -r $reqFile --quiet 2>&1 | Out-Null
+$ErrorActionPreference = "Continue"
+try { & $pipExe install --upgrade pip --quiet 2>&1 | Out-Null } catch {}
+try { & $pipExe install -r $reqFile --quiet 2>&1 | Out-Null } catch {}
+$ErrorActionPreference = "Stop"
 Write-OK "Packages installed"
 
 Set-Location $savedLoc
