@@ -213,7 +213,6 @@ Write-Host ""
 
 $InstallDir = Read-Input -Prompt "Install directory" -Default $InstallDir
 
-# ── AD Config ──
 Write-Host ""
 Write-Host "  -- STEP 1: AD Configuration --" -ForegroundColor Cyan
 
@@ -234,7 +233,6 @@ $useLdaps = Read-Input -Prompt "Use LDAPS (true/false)" -Default "true"
 $adPort = "389"
 if ($useLdaps -eq "true") { $adPort = "636" }
 
-# ── Admin User ──
 Write-Host ""
 Write-Host "  -- STEP 2: First Admin User --" -ForegroundColor Cyan
 Write-Info "Must have a valid AD account"
@@ -243,7 +241,6 @@ $adminUser = Read-Input -Prompt "AD username" -Required
 $adminName = Read-Input -Prompt "Display name" -Default $adminUser
 $adminEmail = Read-Input -Prompt "Email" -Default "$adminUser@$adDomain"
 
-# ── Summary ──
 Write-Host ""
 Write-Host "  -- Summary --" -ForegroundColor Cyan
 Write-Info "Install Dir : $InstallDir"
@@ -279,7 +276,6 @@ if (-not $pythonCmd) {
     } catch {
         Write-Fail "Download failed: $_"
         Write-Host "  Install Python manually from https://python.org" -ForegroundColor Yellow
-        Write-Host "  Check Add Python to PATH" -ForegroundColor Yellow
         Read-Host "  Press Enter after installing"
     }
     if (Test-Path $pyInst) {
@@ -375,7 +371,6 @@ $fSrc = Join-Path $sourceDir "frontend"
 
 if (-not (Test-Path (Join-Path $bSrc "app.py"))) {
     Write-Fail "Backend source not found at $bSrc"
-    Write-Host "  install.ps1 must be in the project root" -ForegroundColor Yellow
     Read-Host "  Press Enter to exit"
     exit 1
 }
@@ -386,42 +381,39 @@ if (-not (Test-Path (Join-Path $fSrc "package.json"))) {
     exit 1
 }
 
-# Check if source and destination are the same
 $bSrcNorm = $bSrc.ToLower().TrimEnd('\')
 $bDstNorm = $backendDir.ToLower().TrimEnd('\')
 $fSrcNorm = $fSrc.ToLower().TrimEnd('\')
 $fDstNorm = $frontendDir.ToLower().TrimEnd('\')
 
 if ($bSrcNorm -ne $bDstNorm) {
-    $skipDirs = @("venv","__pycache__","database","logs","static","certs")
-    $skipFiles = @(".env")
+    $skipList = @("venv","__pycache__","database","logs","static","certs",".env")
     $items = Get-ChildItem -Path $bSrc
     foreach ($item in $items) {
         $skip = $false
-        foreach ($s in $skipDirs) { if ($item.Name -eq $s) { $skip = $true } }
-        foreach ($s in $skipFiles) { if ($item.Name -eq $s) { $skip = $true } }
+        foreach ($s in $skipList) { if ($item.Name -eq $s) { $skip = $true } }
         if (-not $skip) {
             try { Copy-Item -Path $item.FullName -Destination $backendDir -Recurse -Force } catch {}
         }
     }
     Write-OK "Backend files copied"
 } else {
-    Write-OK "Backend files already in place (running from source)"
+    Write-OK "Backend already in place (same directory)"
 }
 
 if ($fSrcNorm -ne $fDstNorm) {
-    $skipDirs2 = @("node_modules","dist",".vite")
+    $skipList2 = @("node_modules","dist",".vite")
     $items2 = Get-ChildItem -Path $fSrc
     foreach ($item in $items2) {
         $skip = $false
-        foreach ($s in $skipDirs2) { if ($item.Name -eq $s) { $skip = $true } }
+        foreach ($s in $skipList2) { if ($item.Name -eq $s) { $skip = $true } }
         if (-not $skip) {
             try { Copy-Item -Path $item.FullName -Destination $frontendDir -Recurse -Force } catch {}
         }
     }
     Write-OK "Frontend files copied"
 } else {
-    Write-OK "Frontend files already in place (running from source)"
+    Write-OK "Frontend already in place (same directory)"
 }
 
 # ================================================================
@@ -435,7 +427,7 @@ $secretKey = ""
 try {
     $secretKey = & $pythonCmd -c "import secrets; print(secrets.token_hex(64))" 2>&1
     $secretKey = [string]$secretKey
-    if (-not $secretKey -or $secretKey.Length -lt 32) { throw "bad key" }
+    if (-not $secretKey -or $secretKey.Length -lt 32) { throw "bad" }
 } catch {
     $g1 = [System.Guid]::NewGuid().ToString("N")
     $g2 = [System.Guid]::NewGuid().ToString("N")
@@ -464,6 +456,13 @@ $envFile = Join-Path $backendDir ".env"
 [System.IO.File]::WriteAllLines($envFile, $envLines)
 Write-OK "Configuration saved"
 
+# Write clean requirements.txt (no pandas)
+Write-Step "6.3" "Writing requirements.txt..."
+$reqLines = @("fastapi","uvicorn[standard]","python-jose[cryptography]","passlib[bcrypt]","python-multipart","sqlalchemy","ldap3","python-dotenv","cryptography")
+$reqFile = Join-Path $backendDir "requirements.txt"
+[System.IO.File]::WriteAllLines($reqFile, $reqLines)
+Write-OK "requirements.txt created"
+
 # ================================================================
 # STEP 7: Python Environment
 # ================================================================
@@ -474,23 +473,36 @@ $savedLoc = Get-Location
 Set-Location $backendDir
 
 $venvPath = Join-Path $backendDir "venv"
+$pipExe = Join-Path $backendDir "venv\Scripts\pip.exe"
+$pythonExe = Join-Path $backendDir "venv\Scripts\python.exe"
 
-if (-not (Test-Path (Join-Path $venvPath "Scripts\python.exe"))) {
+if (-not (Test-Path $pythonExe)) {
     Write-Step "7.1" "Creating virtual environment..."
     & $pythonCmd -m venv venv 2>&1 | Out-Null
     Write-OK "Virtual environment created"
 } else {
-    Write-OK "Virtual environment already exists"
+    Write-OK "Virtual environment exists"
 }
 
-Write-Step "7.2" "Installing packages (2-3 min)..."
-$pipExe = Join-Path $backendDir "venv\Scripts\pip.exe"
-$pythonExe = Join-Path $backendDir "venv\Scripts\python.exe"
-$reqFile = Join-Path $backendDir "requirements.txt"
-
+Write-Step "7.2" "Installing Python packages (2-3 min)..."
 & $pipExe install --upgrade pip --quiet 2>&1 | Out-Null
-& $pipExe install -r $reqFile --quiet 2>&1 | Out-Null
-Write-OK "Packages installed"
+& $pipExe install -r $reqFile 2>&1 | Out-Null
+
+# Verify key package
+$checkResult = & $pythonExe -c "import fastapi; print('OK')" 2>&1
+$checkStr = [string]$checkResult
+if ($checkStr -match "OK") {
+    Write-OK "Python packages installed and verified"
+} else {
+    Write-Fail "Package verification failed. Retrying..."
+    & $pipExe install fastapi uvicorn sqlalchemy ldap3 python-jose passlib python-multipart python-dotenv cryptography 2>&1 | Out-Null
+    $checkResult2 = & $pythonExe -c "import fastapi; print('OK')" 2>&1
+    if ([string]$checkResult2 -match "OK") {
+        Write-OK "Packages installed on retry"
+    } else {
+        Write-Fail "Packages still failing. Check pip output."
+    }
+}
 
 Set-Location $savedLoc
 
@@ -503,7 +515,7 @@ Write-Host "  -- STEP 8: Building Frontend --" -ForegroundColor Cyan
 $savedLoc = Get-Location
 Set-Location $frontendDir
 
-Write-Step "8.1" "Configuring..."
+Write-Step "8.1" "Configuring frontend..."
 $envProdFile = Join-Path $frontendDir ".env.production"
 [System.IO.File]::WriteAllText($envProdFile, "VITE_API_URL=")
 Write-OK "Configured"
@@ -517,7 +529,12 @@ if (-not (Test-Path $nmPath)) {
     Write-OK "npm packages already installed"
 }
 
-Write-Step "8.3" "Building production frontend..."
+# Install esbuild separately (required by newer Vite)
+Write-Step "8.3" "Ensuring esbuild is installed..."
+& npm install esbuild --save-dev 2>&1 | Out-Null
+Write-OK "esbuild ready"
+
+Write-Step "8.4" "Building production frontend..."
 & npm run build 2>&1 | Out-Null
 
 $distDir = Join-Path $frontendDir "dist"
@@ -526,30 +543,38 @@ $distIndex = Join-Path $distDir "index.html"
 if (Test-Path $distIndex) {
     Write-OK "Frontend built successfully"
 } else {
-    Write-Fail "Frontend build may have failed"
-    Write-Info "Check if Node.js and npm are working correctly"
+    Write-Fail "Frontend build failed - trying alternative..."
+    # Try clearing cache and rebuilding
+    $viteCacheDir = Join-Path $frontendDir "node_modules\.vite"
+    if (Test-Path $viteCacheDir) {
+        Remove-Item $viteCacheDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    & npm run build 2>&1 | Out-Null
+    if (Test-Path $distIndex) {
+        Write-OK "Frontend built on retry"
+    } else {
+        Write-Fail "Frontend build failed. Build manually after install:"
+        Write-Host "    cd `"$frontendDir`"" -ForegroundColor Gray
+        Write-Host "    npm run build" -ForegroundColor Gray
+    }
 }
 
 Set-Location $savedLoc
 
 # Deploy to backend static
 $staticDir = Join-Path $backendDir "static"
-if (Test-Path $distDir) {
-    # Clear old static files first
-    try { Get-ChildItem $staticDir | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+if (Test-Path $distIndex) {
+    try { Get-ChildItem $staticDir -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue } catch {}
     Copy-Item -Path (Join-Path $distDir "*") -Destination $staticDir -Recurse -Force
-    Write-OK "Frontend deployed to backend"
+    $staticIndex = Join-Path $staticDir "index.html"
+    if (Test-Path $staticIndex) {
+        Write-OK "Frontend deployed and verified"
+    } else {
+        Write-Fail "Deploy copy failed"
+    }
 } else {
-    Write-Fail "No dist folder - frontend not deployed"
-}
-
-# Verify
-$staticIndex = Join-Path $staticDir "index.html"
-if (Test-Path $staticIndex) {
-    Write-OK "Verified: index.html present in static folder"
-} else {
-    Write-Fail "Warning: index.html NOT found in static folder"
-    Write-Info "The API will work but there will be no web UI"
+    Write-Fail "No dist/index.html - frontend not deployed"
+    Write-Info "API will work but no web UI"
 }
 
 # ================================================================
@@ -561,11 +586,12 @@ Write-Host "  -- STEP 9: Creating Admin User --" -ForegroundColor Cyan
 $savedLoc = Get-Location
 Set-Location $backendDir
 
-# Write Python script to temp file to avoid encoding issues
 $tmpPy = Join-Path $env:TEMP "adm_setup_user.py"
 
 $pyLines = @()
 $pyLines += "import sys"
+$pyLines += "import os"
+$pyLines += "os.chdir(r'" + $backendDir + "')"
 $pyLines += "sys.path.insert(0, r'" + $backendDir + "')"
 $pyLines += "try:"
 $pyLines += "    from app import AppUser, SessionLocal"
@@ -600,11 +626,10 @@ try {
         Write-Fail "Could not create admin: $rs"
         Write-Info "Create manually after install:"
         Write-Host "    cd `"$backendDir`"" -ForegroundColor Gray
-        Write-Host "    .\venv\Scripts\python.exe -c `"from app import AppUser, SessionLocal; db = SessionLocal(); db.add(AppUser(username='$adminUser', display_name='$adminName', email='$adminEmail', role='Admin', active=True)); db.commit(); print('OK'); db.close()`"" -ForegroundColor Gray
+        Write-Host "    .\venv\Scripts\python.exe -c `"from app import AppUser,SessionLocal; db=SessionLocal(); db.add(AppUser(username='$adminUser',display_name='$adminName',email='$adminEmail',role='Admin',active=True)); db.commit(); print('OK'); db.close()`"" -ForegroundColor Gray
     }
 } catch {
     Write-Fail "Admin creation error: $_"
-    Write-Info "Create manually after install"
 }
 
 try { Remove-Item $tmpPy -Force } catch {}
@@ -616,7 +641,6 @@ Set-Location $savedLoc
 Write-Host ""
 Write-Host "  -- STEP 10: Creating Scripts --" -ForegroundColor Cyan
 
-# Production script
 $prodLines = @()
 $prodLines += "@echo off"
 $prodLines += "title AD Manager Pro - Production"
@@ -629,7 +653,6 @@ $prodLines += "venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 
 $prodFile = Join-Path $backendDir "start_production.bat"
 [System.IO.File]::WriteAllLines($prodFile, $prodLines)
 
-# Dev script
 $devLines = @()
 $devLines += "@echo off"
 $devLines += "title AD Manager Pro - Development"
@@ -665,7 +688,7 @@ Start-Sleep -Seconds 2
 $batPath = Join-Path $backendDir "start_production.bat"
 $ok = Create-Task -Name "AD Manager Pro" -Bat $batPath -Desc "AD Manager Pro HTTP Service"
 if ($ok) { Write-OK "Service created (auto-starts on boot)" }
-else { Write-Fail "Could not create service. Start manually: $batPath" }
+else { Write-Fail "Could not create service" }
 
 # ================================================================
 # STEP 12: Firewall
@@ -705,17 +728,12 @@ Write-Host ""
 if ($started) { Write-OK "Application is running and healthy!" }
 else {
     Write-Info "Application may still be starting..."
-    Write-Info "Try opening http://localhost:${AppPort} in a browser"
-    Write-Info "Check logs: type `"$backendDir\logs\service.log`""
+    Write-Info "Try: http://localhost:${AppPort}"
+    Write-Info "Logs: type `"$backendDir\logs\service.log`""
 }
 
-# ================================================================
-# Copy installer for future uninstall
-# ================================================================
-try {
-    $uninstFile = Join-Path $InstallDir "uninstall.ps1"
-    Copy-Item $MyInvocation.MyCommand.Path $uninstFile -Force
-} catch {}
+# Copy installer for uninstall
+try { Copy-Item $MyInvocation.MyCommand.Path (Join-Path $InstallDir "uninstall.ps1") -Force } catch {}
 
 # ================================================================
 # DONE
@@ -748,7 +766,6 @@ Write-Host ""
 Write-Host "  Uninstall:" -ForegroundColor Cyan
 Write-Host "    powershell -ExecutionPolicy Bypass -File `"$InstallDir\uninstall.ps1`" -Uninstall" -ForegroundColor Gray
 Write-Host ""
-Write-Host "  API Docs:" -ForegroundColor Cyan
-Write-Host "    http://${hn}:$AppPort/docs" -ForegroundColor Gray
+Write-Host "  API Docs: http://${hn}:$AppPort/docs" -ForegroundColor Gray
 Write-Host ""
 Read-Host "  Press Enter to finish"
