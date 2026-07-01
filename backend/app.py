@@ -3234,23 +3234,11 @@ else:
     async def api_only_root():
         return {"app": "AD Manager Pro", "version": "2.2.2", "status": "running"}
 
-# ═══ Entry Point ═════════════════════════════════════════════
+# ═══ Entry Point ═════════════════════════════════════════
 if __name__ == "__main__":
-    cert = "certs/cert.pem"
-    key  = "certs/key.pem"
-    if os.path.exists(cert) and os.path.exists(key):
-        uvicorn.run(
-            "app:app",
-            host=config.APP_HOST,
-            port=config.APP_PORT,
-            ssl_certfile=cert,
-            ssl_keyfile=key,
-            log_level="info"
-        )
-    else:
-        uvicorn.run(
-            "app:app",
-            host=config.APP_HOST,
-            port=8000,
-            log_level="info"
-        )
+    uvicorn.run(
+        "app:app",
+        host=config.APP_HOST,
+        port=config.APP_PORT,
+        log_level="info"
+    )

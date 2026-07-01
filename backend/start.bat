@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM AD Manager Pro - Start Backend Server
+REM AD Manager Pro - Start Backend Server (HTTP)
 REM ============================================================
 
 title AD Manager Pro - Backend Server
@@ -35,14 +35,6 @@ if not exist "app.py" (
     exit /b 1
 )
 
-REM ── Check certs exist ─────────────────────────────────────────
-if not exist "certs\cert.pem" (
-    echo WARNING: SSL certificate not found.
-    echo          Run setup.bat to generate certificates.
-    echo          Starting without SSL...
-    echo.
-)
-
 REM ── Activate virtual environment ──────────────────────────────
 echo    Activating virtual environment...
 call venv\Scripts\activate.bat
@@ -54,20 +46,18 @@ echo  ==========================================
 echo   Server Information
 echo  ==========================================
 echo.
-echo   URL:      https://localhost:8443
-echo   API Docs: https://localhost:8443/docs
+echo   URL:      http://localhost:8080
+echo   API Docs: http://localhost:8080/docs
 echo   Status:   Starting...
 echo.
 echo   Press CTRL+C to stop the server
 echo  ==========================================
 echo.
 
-REM ── Start the server ──────────────────────────────────────────
+REM ── Start the server (HTTP only, no SSL) ──────────────────────
 venv\Scripts\python.exe -m uvicorn app:app ^
     --host 0.0.0.0 ^
-    --port 8443 ^
-    --ssl-keyfile certs/key.pem ^
-    --ssl-certfile certs/cert.pem ^
+    --port 8080 ^
     --reload ^
     --log-level info
 
