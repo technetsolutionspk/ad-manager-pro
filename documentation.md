@@ -1676,6 +1676,261 @@ Step 9: Review the results showing how many users were successfully updated and 
 | Bulk Update | Update different values per user from CSV | CSV with username plus changed fields | No | Yes different values per user |
 | Bulk Move | Move selected users to a different OU | OU dropdown selection | No | No changes location only |
 
+# 18. ACTIVE DIRECTORY PERMISSIONS SETUP
+
+## Overview
+
+Before AD Manager Pro can manage Active Directory objects, the service account used
+by the application must be granted specific permissions on the domain. These permissions
+control what operations the application can perform including creating users, resetting
+passwords, managing groups, and reading GPO information.
+
+AD Manager Pro includes an automated permission setup script called setup_permissions.ps1
+that applies all required permissions in a single operation. This script must be run on
+the Domain Controller or a machine with RSAT tools installed, logged in as a Domain Admin.
+
+## Prerequisites
+
+The setup_permissions.ps1 script requires the following:
+
+Running as Domain Administrator or equivalent. The account running the script must have
+permission to modify ACLs on domain objects.
+
+dsacls.exe must be available. This tool is included on Domain Controllers automatically.
+On other machines, install RSAT with this command:
+
+    Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0
+
+The service account must already exist in Active Directory before running the script.
+Create the service account first using the New-ADUser command or Active Directory
+Users and Computers.
+
+## Running the Script
+
+Copy setup_permissions.ps1 to the Domain Controller or any machine with RSAT installed.
+Right-click PowerShell and select Run as Administrator. Navigate to the script location
+and run:
+
+    powershell -ExecutionPolicy Bypass -File setup_permissions.ps1
+
+The script will perform these steps automatically:
+
+Step 1: Verify dsacls is available and exit with instructions if not found.
+
+Step 2: Auto-detect the domain name, Base DN, and NetBIOS name from the current machine.
+
+Step 3: Ask for the service account sAMAccountName (e.g. svc-admanager). The script
+constructs the full account reference as DOMAIN\svc-admanager automatically.
+
+Step 4: Verify the service account exists in Active Directory. If not found, the script
+exits with an error rather than silently applying permissions to a non-existent account.
+
+Step 5: Show a summary of the domain, account name, and all permissions that will be
+applied, then ask for confirmation before proceeding.
+
+Step 6: Apply all permissions using dsacls commands and report success or failure for
+each permission.
+
+Step 7: Show a final results summary with counts of successful and failed operations
+and a list of what the service account can now do.
+
+## Permissions Applied
+
+The script applies permissions at the domain root level with appropriate inheritance
+flags so the permissions automatically apply to all current and future OUs, users,
+groups, and computers throughout the entire domain.
+
+### Domain Root Level
+
+Generic Read with subject inheritance is applied at the domain root so the service
+account can read all objects throughout the domain. This enables listing users, groups,
+computers, and OUs.
+
+Read gPLink attribute is applied at the domain root with subject inheritance to allow
+reading which GPOs are linked to which OUs.
+
+### User Object Permissions
+
+| Permission | dsacls Flag | Purpose |
+|---|---|---|
+| Create User objects | CC;user | Create new AD user accounts |
+| Delete Child users | DC;user | Delete user accounts from OUs |
+| Standard Delete users | SD;;user | Delete the user object itself |
+| Write all user properties | WP;;user | Edit any user attribute |
+| Reset Password | CA;Reset Password;user | Extended right to reset passwords |
+| Write pwdLastSet | WP;pwdLastSet;user | Force password change at next logon |
+| Write unicodePwd | WP;unicodePwd;user | Set passwords via LDAP |
+| Write userAccountControl | WP;userAccountControl;user | Enable and disable accounts |
+| Write lockoutTime | WP;lockoutTime;user | Unlock locked accounts |
+| Write thumbnailPhoto | WP;thumbnailPhoto;user | Upload and delete user photos |
+
+### Group Object Permissions
+
+| Permission | dsacls Flag | Purpose |
+|---|---|---|
+| Create Group objects | CC;group | Create new security and distribution groups |
+| Delete Child groups | DC;group | Delete groups from OUs |
+| Standard Delete groups | SD;;group | Delete the group object itself |
+| Write member attribute | WP;member;group | Add and remove group members |
+
+### Computer Object Permissions
+
+| Permission | dsacls Flag | Purpose |
+|---|---|---|
+| Create Computer objects | CC;computer | Create new computer accounts |
+| Delete Child computers | DC;computer | Delete computer accounts from OUs |
+| Standard Delete computers | SD;;computer | Delete the computer object itself |
+| Write userAccountControl | WP;userAccountControl;computer | Enable and disable computer accounts |
+
+### OU Object Permissions
+
+| Permission | dsacls Flag | Purpose |
+|---|---|---|
+| Create OU objects | CC;organizationalUnit | Create new Organizational Units |
+| Delete Child OUs | DC;organizationalUnit | Delete OUs (only works on empty OUs) |
+
+### GPO Read Permissions
+
+| Permission | Target | Purpose |
+|---|---|---|
+| Generic Read | CN=System,DC=domain,DC=local | Read GPO container |
+| Generic Read | CN=Policies,CN=System,DC=domain,DC=local | Read individual GPO objects |
+
+### Built-in Container Permissions
+
+The script also applies permissions explicitly to the built-in containers CN=Users,
+CN=Computers, and CN=Builtin so the service account can manage objects in the default
+containers that exist before any custom OUs are created.
+
+## dsacls Flag Reference
+
+The following flags are used by the permission script:
+
+| Flag | Meaning |
+|---|---|
+| /I:S | Apply to subobjects (subject inheritance) |
+| /I:T | Apply to child objects (tree inheritance) |
+| GR | Generic Read - read all properties and list contents |
+| CC | Create Child - create child objects of specified class |
+| DC | Delete Child - delete child objects of specified class |
+| SD | Standard Delete - delete the object itself |
+| WP | Write Property - modify a specific attribute |
+| CA | Control Access - extended rights such as Reset Password |
+| RP | Read Property - read a specific attribute |
+
+## Important Note on Password Operations
+
+Password reset (unicodePwd) and force-change (pwdLastSet) operations require an
+encrypted LDAP connection. Microsoft Active Directory refuses these operations over
+plain LDAP on port 389 and returns a WILL_NOT_PERFORM error code 53.
+
+To enable password operations, configure LDAPS on the Domain Controller by installing
+Active Directory Certificate Services or importing a certificate into the DC's personal
+store. Then configure AD Manager Pro to use LDAPS by setting AD_USE_LDAPS to true and
+AD_PORT to 636 in the .env file or through the Settings page in the web interface.
+
+If LDAPS cannot be configured, all features except password reset will work normally.
+Password resets must be performed using other tools such as Active Directory Users and
+Computers or the PowerShell Set-ADAccountPassword command.
+
+## Verifying Permissions
+
+After running the script, verify the permissions were applied correctly by testing
+the AD connection in AD Manager Pro Settings page using the Test Connection button.
+If the connection succeeds, the basic read permissions are working. Then test by
+creating a test user, modifying an attribute, and resetting a password to verify
+each category of permissions.
+
+You can also verify permissions using the Active Directory Users and Computers tool.
+Right-click the domain root, select Properties, go to the Security tab, and find the
+service account in the list. Click Advanced to see the full list of inherited permissions.
+
+## Troubleshooting Permission Issues
+
+### GPO page shows no objects
+
+The service account does not have read permission on CN=Policies,CN=System. Run the
+script again or manually run:
+
+    dsacls "CN=Policies,CN=System,DC=domain,DC=local" /I:T /G "DOMAIN\svc-admanager:GR"
+
+### Delete user fails but other operations work
+
+The service account has Write Property but not Delete permissions. Run the script again
+ensuring it completes without errors, specifically the SD (Standard Delete) permission steps.
+
+### Password reset fails with WILL_NOT_PERFORM
+
+LDAPS is not enabled. See the LDAPS section above. This error means the permission is
+actually correct but the connection is not encrypted.
+
+### Some OUs work but new OUs do not get permissions
+
+New OUs inherit permissions from parent by default. However if an OU was created with
+inheritance blocked, the service account will not have permissions on it. Check the
+Security tab of the problem OU and look for a lock icon indicating blocked inheritance.
+Right-click the OU in Active Directory Users and Computers, go to Properties, Security,
+Advanced, and check if inheritance is enabled.
+
+### Access denied when running the script
+
+The script must be run as Domain Admin or with an account that has Write DACL permission
+on the domain root. Log in as a Domain Admin and run PowerShell as Administrator before
+executing the script.
+
+## Manual Permission Commands
+
+If the automated script fails or you prefer to apply permissions manually, here are
+the individual dsacls commands. Replace DOMAIN with your NetBIOS domain name and
+svc-admanager with your service account name. Replace the Base DN with your actual
+domain DN.
+
+    REM Generic Read on entire domain
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:GR"
+
+    REM Create and delete users
+    dsacls "DC=company,DC=local" /I:T /G "DOMAIN\svc-admanager:CC;user;"
+    dsacls "DC=company,DC=local" /I:T /G "DOMAIN\svc-admanager:DC;user;"
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:SD;;user"
+
+    REM Write all user properties
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:WP;;user"
+
+    REM Password operations
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:CA;Reset Password;user"
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:WP;pwdLastSet;user"
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:WP;unicodePwd;user"
+
+    REM Account control
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:WP;userAccountControl;user"
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:WP;lockoutTime;user"
+
+    REM Photos
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:WP;thumbnailPhoto;user"
+
+    REM Groups
+    dsacls "DC=company,DC=local" /I:T /G "DOMAIN\svc-admanager:CC;group;"
+    dsacls "DC=company,DC=local" /I:T /G "DOMAIN\svc-admanager:DC;group;"
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:SD;;group"
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:WP;member;group"
+
+    REM Computers
+    dsacls "DC=company,DC=local" /I:T /G "DOMAIN\svc-admanager:CC;computer;"
+    dsacls "DC=company,DC=local" /I:T /G "DOMAIN\svc-admanager:DC;computer;"
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:SD;;computer"
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:WP;userAccountControl;computer"
+
+    REM OUs
+    dsacls "DC=company,DC=local" /I:T /G "DOMAIN\svc-admanager:CC;organizationalUnit;"
+    dsacls "DC=company,DC=local" /I:T /G "DOMAIN\svc-admanager:DC;organizationalUnit;"
+
+    REM GPO read
+    dsacls "CN=System,DC=company,DC=local" /I:T /G "DOMAIN\svc-admanager:GR"
+    dsacls "CN=Policies,CN=System,DC=company,DC=local" /I:T /G "DOMAIN\svc-admanager:GR"
+
+    REM GPO links
+    dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:RP;gPLink;"
+
 # DOCUMENT METADATA
 
 Document Version: 2.2.2

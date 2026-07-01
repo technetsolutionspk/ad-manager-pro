@@ -214,6 +214,36 @@ Kill orphan processes:
 
     Get-Process | Where-Object { $_.ProcessName -like "*python*" } | Stop-Process -Force
 
+## Active Directory Permissions Setup
+
+Before using AD Manager Pro, the service account must be granted permissions on your domain.
+Run the included permission setup script on your Domain Controller.
+
+### Quick Setup
+
+Copy `setup_permissions.ps1` to your Domain Controller and run as Domain Admin:
+
+    powershell -ExecutionPolicy Bypass -File setup_permissions.ps1
+
+The script will automatically detect your domain, verify the service account exists,
+and apply all required permissions.
+
+### What Permissions Are Granted
+
+| Object | Create | Read | Update | Delete |
+|---|---|---|---|---|
+| Users | Yes | Yes | Yes (all attributes) | Yes |
+| Groups | Yes | Yes | Yes (membership) | Yes |
+| Computers | Yes | Yes | Yes (enable/disable) | Yes |
+| OUs | Yes | Yes | Yes (description) | Yes (empty only) |
+| GPOs | No | Yes | No | No |
+
+### Important Note on Passwords
+
+Password reset and change operations require LDAPS (port 636) to be enabled
+on the Domain Controller. Without LDAPS, password operations will fail with
+WILL_NOT_PERFORM error. Configure AD Manager Pro to use LDAPS in Settings.
+
 ## Documentation
 
 See DOCUMENTATION.md for the complete 85-page documentation including full API reference with 80+ endpoints, database schema, AD permissions guide, troubleshooting guide, maintenance schedule, and AI regeneration prompt.
