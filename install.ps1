@@ -586,7 +586,7 @@ Write-Host "    Stop  : schtasks /end /tn `"AD Manager Pro`"" -ForegroundColor G
 Write-Host "    Logs  : type `"$backendDir\logs\service.log`"" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Uninstall:" -ForegroundColor Cyan
-Write-Host "    powershell -ExecutionPolicy Bypass -File "C:\Program Files\AD Manager Pro\uninstall.ps1"`" -Uninstall" -ForegroundColor Gray
+Write-Host "    powershell -ExecutionPolicy Bypass -File "C:\Program Files\AD Manager Pro\uninstall.ps1" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  API Docs: http://${hn}:$AppPort/docs" -ForegroundColor Gray
 Write-Host ""
