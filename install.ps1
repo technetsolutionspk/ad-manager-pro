@@ -3,7 +3,7 @@ param(
     [switch]$Uninstall
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $Version = "2.2.2"
 $AppPort = "8080"
 
@@ -458,11 +458,16 @@ Write-Step "8.1" "Configuring..."
 Write-OK "Configured"
 
 Write-Step "8.2" "Installing npm packages (3-5 min)..."
+$ErrorActionPreference = "Continue"
 & npm install --silent 2>&1 | Out-Null
+$ErrorActionPreference = "Stop"
 Write-OK "npm packages installed"
 
 Write-Step "8.3" "Building production frontend..."
+$ErrorActionPreference = "Continue"
 & npm run build 2>&1 | Out-Null
+$ErrorActionPreference = "Stop"
+Write-OK "Frontend built"
 if ($LASTEXITCODE -eq 0) { Write-OK "Frontend built" }
 else { Write-Fail "Build failed - app may not have UI" }
 
