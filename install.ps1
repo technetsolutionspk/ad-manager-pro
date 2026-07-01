@@ -1,6 +1,5 @@
 param(
-    [string]$InstallDir = "C:\Program Files\AD Manager Pro",
-    [switch]$Uninstall
+    [string]$InstallDir = "C:\Program Files\AD Manager Pro"
 )
 
 $ErrorActionPreference = "Continue"
@@ -107,46 +106,6 @@ function Get-IPs {
         }
     } catch {}
     return $ips
-}
-
-# ================================================================
-# UNINSTALL
-# ================================================================
-if ($Uninstall) {
-    Clear-Host
-    Write-Host ""
-    Write-Host "  UNINSTALLING AD Manager Pro" -ForegroundColor Red
-    Write-Host "  ============================================" -ForegroundColor DarkGray
-    $c = Read-Input -Prompt "Remove all files and services (yes/no)" -Default "no"
-    if ($c -ne "yes") { Write-Info "Cancelled"; exit 0 }
-    Write-Step "1" "Stopping services..."
-    Remove-Task "AD Manager Pro"
-    Remove-Task "AD Manager Pro HTTP"
-    Write-OK "Services removed"
-    Write-Step "2" "Removing firewall rules..."
-    Remove-FW "AD Manager Pro"
-    Remove-FW "AD Manager Pro HTTPS"
-    Remove-FW "AD Manager Pro HTTP"
-    Write-OK "Firewall rules removed"
-    Write-Step "3" "Stopping Python..."
-    try { Get-Process | Where-Object { $_.ProcessName -like "*python*" } | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
-    Start-Sleep -Seconds 2
-    Write-OK "Done"
-    $kb = Read-Input -Prompt "Keep database/audit logs (yes/no)" -Default "yes"
-    Write-Step "4" "Removing files..."
-    if (Test-Path $InstallDir) {
-        if ($kb -eq "yes") {
-            $dbf = Join-Path $InstallDir "backend\database\audit.db"
-            $dbk = Join-Path ([System.Environment]::GetFolderPath("Desktop")) "admanagerpro_audit.db.backup"
-            if (Test-Path $dbf) { Copy-Item $dbf $dbk -Force; Write-OK "Database backed up to $dbk" }
-        }
-        Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-        Write-OK "Files removed"
-    }
-    Write-Host ""
-    Write-Host "  Uninstall Complete" -ForegroundColor Green
-    Read-Host "  Press Enter to exit"
-    exit 0
 }
 
 # ================================================================
@@ -375,7 +334,7 @@ else {
     & $pipExe install fastapi uvicorn sqlalchemy ldap3 python-jose passlib python-multipart python-dotenv cryptography 2>&1 | Out-Null
     $chk2 = & $pythonExe -c "import fastapi; print('OK')" 2>&1
     if ([string]$chk2 -match "OK") { Write-OK "Packages installed on retry" }
-    else { Write-Fail "Package install failed. Run manually: $pipExe install -r $reqFile" }
+    else { Write-Fail "Package install failed" }
 }
 Set-Location $savedLoc
 
@@ -407,7 +366,7 @@ Write-Step "8.4" "Building production frontend..."
 $distIndex = Join-Path $frontendDir "dist\index.html"
 if (Test-Path $distIndex) { Write-OK "Frontend built successfully" }
 else {
-    Write-Fail "Build failed. Retrying after cache clear..."
+    Write-Fail "Build failed. Retrying..."
     $vc = Join-Path $frontendDir "node_modules\.vite"
     if (Test-Path $vc) { Remove-Item $vc -Recurse -Force -ErrorAction SilentlyContinue }
     & npm run build 2>&1 | Out-Null
@@ -416,7 +375,7 @@ else {
 }
 Set-Location $savedLoc
 
-# Deploy frontend to backend static
+# Deploy frontend
 $distDir = Join-Path $frontendDir "dist"
 $staticDir = Join-Path $backendDir "static"
 $distIndex = Join-Path $distDir "index.html"
@@ -483,7 +442,7 @@ $svcLines = @("@echo off", "cd /d `"$backendDir`"", "`"$pythonExe`" -m uvicorn a
 $devLines = @("@echo off", "title AD Manager Pro - Development", "cd /d `"$backendDir`"", "if not exist `"venv\Scripts\activate.bat`" (echo ERROR: No venv & pause & exit /b 1)", "echo.", "echo  AD Manager Pro - Development Server", "echo  URL: http://localhost:$AppPort", "echo  Press CTRL+C to stop", "echo.", "call venv\Scripts\activate.bat", "python -m uvicorn app:app --host 0.0.0.0 --port $AppPort --reload --log-level info", "pause")
 [System.IO.File]::WriteAllLines((Join-Path $backendDir "start.bat"), $devLines)
 
-# start_production.bat for manual production start
+# start_production.bat for manual start
 $prodLines = @("@echo off", "title AD Manager Pro - Production", "cd /d `"$backendDir`"", "`"$pythonExe`" -m uvicorn app:app --host 0.0.0.0 --port $AppPort --workers 4 --log-level info >> `"$backendDir\logs\service.log`" 2>&1")
 [System.IO.File]::WriteAllLines((Join-Path $backendDir "start_production.bat"), $prodLines)
 
@@ -515,7 +474,7 @@ $xmlFile = Join-Path $env:TEMP "admpro_task.xml"
 
 schtasks /delete /tn "AD Manager Pro" /f 2>$null
 $taskResult = & schtasks /create /tn "AD Manager Pro" /xml $xmlFile /f 2>&1
-if ($taskResult -match "SUCCESS") { Write-OK "Service created (auto-starts on boot)" }
+if ([string]$taskResult -match "SUCCESS") { Write-OK "Service created (auto-starts on boot)" }
 else { Write-Fail "Could not create service: $taskResult" }
 try { Remove-Item $xmlFile -Force } catch {}
 
@@ -556,8 +515,15 @@ else {
     Write-Info "Check logs: type `"$backendDir\logs\service.log`""
 }
 
-# Copy installer for uninstall
-try { Copy-Item $MyInvocation.MyCommand.Path (Join-Path $InstallDir "uninstall.ps1") -Force } catch {}
+# ================================================================
+# Copy uninstall script (NOT the installer itself)
+# ================================================================
+$uninstSource = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "uninstall.ps1"
+if (Test-Path $uninstSource) {
+    try { Copy-Item $uninstSource (Join-Path $InstallDir "uninstall.ps1") -Force; Write-OK "Uninstall script copied" } catch {}
+} else {
+    Write-Info "No separate uninstall.ps1 found in source"
+}
 
 # ================================================================
 # DONE
@@ -587,6 +553,7 @@ Write-Host "    Logs  : type `"$backendDir\logs\service.log`"" -ForegroundColor 
 Write-Host ""
 Write-Host "  Uninstall:" -ForegroundColor Cyan
 Write-Host "    powershell -ExecutionPolicy Bypass -File `"$InstallDir\uninstall.ps1`"" -ForegroundColor Gray
+Write-Host ""
 Write-Host "  API Docs: http://${hn}:$AppPort/docs" -ForegroundColor Gray
 Write-Host ""
 Read-Host "  Press Enter to finish"
