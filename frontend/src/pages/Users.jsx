@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import {
   Search, Lock, Unlock, KeyRound, UserX, UserCheck,
   RefreshCw, X, UserPlus, Upload, Download, Edit, Trash2,
-  Move, CheckSquare, Square, MoreVertical, Filter, FileText
+  Move, CheckSquare, Square, MoreVertical, Filter, FileText,
+  Eye, EyeOff
 } from 'lucide-react'
 import {
   getUsers, disableUser, enableUser, unlockUser, resetPassword,
@@ -22,6 +23,9 @@ export default function Users() {
   const [showEdit, setShowEdit]         = useState(false)
   const [showMove, setShowMove]         = useState(false)
   const [newPassword, setNewPassword]   = useState('')
+  const [forceChange, setForceChange]   = useState(true)
+  const [unlockAccount, setUnlockAccount] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
   const [message, setMessage]           = useState(null)
   const user = JSON.parse(localStorage.getItem('user') || '{}')
 
@@ -86,17 +90,45 @@ export default function Users() {
       return
     }
     try {
-      await resetPassword(selected.username, newPassword, true)
-      showMessage('success', `Password reset for ${selected.username}`)
-      setShowReset(false)
-      setNewPassword('')
-      setSelected(null)
+      await resetPassword(selected.username, newPassword, forceChange)
+
+      if (unlockAccount && selected.locked) {
+        try {
+          await unlockUser(selected.username)
+          showMessage('success', `Password reset and account unlocked for ${selected.username}`)
+        } catch (unlockErr) {
+          showMessage('success', `Password reset for ${selected.username}. Unlock failed: ${unlockErr.response?.data?.detail || 'error'}`)
+        }
+      } else {
+        showMessage('success', `Password reset for ${selected.username}${forceChange ? ' (must change at next logon)' : ''}`)
+      }
+
+      closeResetModal()
+      loadUsers(search)
     } catch (err) {
       showMessage('error', err.response?.data?.detail || 'Reset failed')
     }
   }
 
-  // ── Bulk Selection ──
+  const closeResetModal = () => {
+    setShowReset(false)
+    setNewPassword('')
+    setForceChange(true)
+    setUnlockAccount(false)
+    setShowPassword(false)
+    setSelected(null)
+  }
+
+  const generatePassword = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%'
+    let pwd = ''
+    for (let i = 0; i < 16; i++) {
+      pwd += chars.charAt(Math.floor(Math.random() * chars.length))
+    }
+    setNewPassword(pwd)
+    setShowPassword(true)
+  }
+
   const toggleSelectUser = (username) => {
     const newSet = new Set(selectedUsers)
     if (newSet.has(username)) newSet.delete(username)
@@ -112,7 +144,6 @@ export default function Users() {
     }
   }
 
-  // ── Bulk Actions ──
   const handleBulkAction = async (action) => {
     if (selectedUsers.size === 0) {
       showMessage('error', 'No users selected')
@@ -131,7 +162,6 @@ export default function Users() {
     }
   }
 
-  // ── Filter by status ──
   const filteredUsers = statusFilter === 'all'
     ? users
     : users.filter(u => u.status === statusFilter)
@@ -200,7 +230,6 @@ export default function Users() {
           >
             <Upload size={16} /> Bulk Import
           </button>
-          {/* ✅ NEW: Bulk Update CSV Button */}
           <button
             onClick={() => setShowBulkUpdate(true)}
             className="px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded-lg flex items-center gap-2"
@@ -388,23 +417,102 @@ export default function Users() {
         </div>
       </div>
 
-      {/* ── Modals ── */}
+      {/* ── Reset Password Modal ── */}
       {showReset && selected && (
-        <Modal title="Reset Password" onClose={() => { setShowReset(false); setNewPassword('') }}>
+        <Modal title="Reset Password" onClose={closeResetModal}>
           <p className="text-sm text-slate-400 mb-4">
             Resetting password for <span className="text-white font-medium">{selected.username}</span>
           </p>
-          <input
-            type="password"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            placeholder="New password (min 8 chars)"
-            className="w-full px-4 py-2.5 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500 mb-4"
-            autoFocus
-          />
+
+          {/* Password input with show/hide and generate */}
+          <div className="relative mb-4">
+            <input
+              type={showPassword ? "text" : "password"}
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="New password (min 8 chars)"
+              className="w-full px-4 py-2.5 pr-28 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500"
+              autoFocus
+            />
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="p-1.5 hover:bg-slate-700 rounded text-slate-400"
+                title={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+              <button
+                type="button"
+                onClick={generatePassword}
+                className="px-2 py-1 text-xs bg-purple-600 hover:bg-purple-700 rounded text-white"
+                title="Generate strong password"
+              >
+                Generate
+              </button>
+            </div>
+          </div>
+
+          {newPassword.length > 0 && newPassword.length < 8 && (
+            <p className="text-xs text-red-400 mb-3">
+              Password too short ({newPassword.length}/8 minimum)
+            </p>
+          )}
+
+          {/* Options */}
+          <div className="space-y-2 mb-4">
+            <label className="flex items-center gap-3 p-3 bg-slate-900 rounded-lg cursor-pointer hover:bg-slate-800 transition">
+              <input
+                type="checkbox"
+                checked={forceChange}
+                onChange={(e) => setForceChange(e.target.checked)}
+                className="w-4 h-4"
+              />
+              <div className="flex-1">
+                <div className="text-sm font-medium text-white">
+                  User must change password at next logon
+                </div>
+                <div className="text-xs text-slate-500">
+                  Forces the user to set their own password on next login
+                </div>
+              </div>
+            </label>
+
+            {selected.locked && (
+              <label className="flex items-center gap-3 p-3 bg-orange-900/20 border border-orange-700/30 rounded-lg cursor-pointer hover:bg-orange-900/30 transition">
+                <input
+                  type="checkbox"
+                  checked={unlockAccount}
+                  onChange={(e) => setUnlockAccount(e.target.checked)}
+                  className="w-4 h-4"
+                />
+                <div className="flex-1">
+                  <div className="text-sm font-medium text-orange-300 flex items-center gap-2">
+                    <Unlock size={14} /> Also unlock account
+                  </div>
+                  <div className="text-xs text-slate-400">
+                    Account is currently locked. Check to unlock after password reset.
+                  </div>
+                </div>
+              </label>
+            )}
+          </div>
+
           <div className="flex gap-2 justify-end">
-            <button onClick={() => { setShowReset(false); setNewPassword('') }} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg">Cancel</button>
-            <button onClick={handleResetPassword} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg">Reset Password</button>
+            <button
+              onClick={closeResetModal}
+              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleResetPassword}
+              disabled={!newPassword || newPassword.length < 8}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Reset Password
+            </button>
           </div>
         </Modal>
       )}
@@ -443,7 +551,6 @@ export default function Users() {
         />
       )}
 
-      {/* ✅ NEW: Bulk Update CSV Modal */}
       {showBulkUpdate && (
         <BulkUpdateCsvModal
           onClose={() => setShowBulkUpdate(false)}
@@ -772,7 +879,7 @@ function BulkModifyModal({ usernames, onClose, onSuccess, onError }) {
 }
 
 // ─────────────────────────────────────────────────────────
-// ✅ Bulk Update from CSV Modal
+// Bulk Update from CSV Modal
 // ─────────────────────────────────────────────────────────
 function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
   const [csvText, setCsvText]   = useState('')
@@ -845,7 +952,6 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
   return (
     <Modal title="Bulk Update Users from CSV" onClose={onClose} wide>
       <div className="space-y-4">
-        {/* Info banner */}
         <div className="bg-blue-900/20 border border-blue-700 p-3 rounded-lg text-sm">
           <p className="text-blue-300 font-medium mb-1">ℹ️ How this works:</p>
           <ul className="text-slate-300 space-y-1 list-disc list-inside text-xs">
@@ -856,7 +962,6 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
           </ul>
         </div>
 
-        {/* File upload + template */}
         <div className="flex gap-2">
           <input
             type="file" accept=".csv"
@@ -871,7 +976,6 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
           </button>
         </div>
 
-        {/* Paste area */}
         <div>
           <label className="text-sm text-slate-400 mb-1 block">Or paste CSV text:</label>
           <textarea
@@ -883,7 +987,6 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
           />
         </div>
 
-        {/* Preview */}
         {rows.length > 0 && !result && (
           <div className="bg-slate-900 p-3 rounded-lg">
             <p className="text-sm text-slate-300 mb-2 font-medium">
@@ -915,7 +1018,6 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
           </div>
         )}
 
-        {/* Results */}
         {result && (
           <div className="bg-slate-900 p-3 rounded-lg space-y-3">
             <div className="grid grid-cols-3 gap-2 text-center">
@@ -946,7 +1048,6 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
           </div>
         )}
 
-        {/* Buttons */}
         <div className="flex gap-2 justify-end pt-2">
           <button
             onClick={onClose}
@@ -976,7 +1077,18 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
 function BulkResetPasswordModal({ usernames, onClose, onSuccess, onError }) {
   const [password, setPassword]       = useState('')
   const [forceChange, setForceChange] = useState(true)
+  const [showPassword, setShowPassword] = useState(false)
   const [resetting, setResetting]     = useState(false)
+
+  const generatePassword = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%'
+    let pwd = ''
+    for (let i = 0; i < 16; i++) {
+      pwd += chars.charAt(Math.floor(Math.random() * chars.length))
+    }
+    setPassword(pwd)
+    setShowPassword(true)
+  }
 
   const handleReset = async () => {
     if (!password || password.length < 8) {
@@ -997,20 +1109,55 @@ function BulkResetPasswordModal({ usernames, onClose, onSuccess, onError }) {
   return (
     <Modal title={`Reset Password for ${usernames.length} Users`} onClose={onClose}>
       <p className="text-sm text-slate-400 mb-4">All selected users will get the same new password.</p>
-      <input
-        type="password" value={password}
-        onChange={(e) => setPassword(e.target.value)}
-        placeholder="New password (min 8 chars)"
-        className="w-full px-4 py-2.5 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500 mb-4"
-        autoFocus
-      />
-      <label className="flex items-center gap-2 mb-4 cursor-pointer">
-        <input type="checkbox" checked={forceChange} onChange={(e) => setForceChange(e.target.checked)} />
-        <span className="text-sm">Force users to change password at next login</span>
+
+      <div className="relative mb-4">
+        <input
+          type={showPassword ? "text" : "password"}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="New password (min 8 chars)"
+          className="w-full px-4 py-2.5 pr-28 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500"
+          autoFocus
+        />
+        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
+          <button
+            type="button"
+            onClick={() => setShowPassword(!showPassword)}
+            className="p-1.5 hover:bg-slate-700 rounded text-slate-400"
+            title={showPassword ? "Hide password" : "Show password"}
+          >
+            {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+          </button>
+          <button
+            type="button"
+            onClick={generatePassword}
+            className="px-2 py-1 text-xs bg-purple-600 hover:bg-purple-700 rounded text-white"
+          >
+            Generate
+          </button>
+        </div>
+      </div>
+
+      <label className="flex items-center gap-3 p-3 bg-slate-900 rounded-lg cursor-pointer hover:bg-slate-800 mb-4">
+        <input
+          type="checkbox"
+          checked={forceChange}
+          onChange={(e) => setForceChange(e.target.checked)}
+          className="w-4 h-4"
+        />
+        <div>
+          <div className="text-sm font-medium text-white">User must change password at next logon</div>
+          <div className="text-xs text-slate-500">All users will be forced to set their own password</div>
+        </div>
       </label>
+
       <div className="flex gap-2 justify-end">
         <button onClick={onClose} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg">Cancel</button>
-        <button onClick={handleReset} disabled={resetting} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50">
+        <button
+          onClick={handleReset}
+          disabled={resetting || !password || password.length < 8}
+          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+        >
           {resetting ? 'Resetting...' : 'Reset Passwords'}
         </button>
       </div>
@@ -1029,12 +1176,23 @@ function CreateUserModal({ onClose, onSuccess, onError }) {
   })
   const [ous, setOus]     = useState([])
   const [saving, setSaving] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
 
   useEffect(() => {
     getOUs().then(d => setOus(d.ous || [])).catch(() => {})
   }, [])
 
   const update = (key, val) => setForm(prev => ({ ...prev, [key]: val }))
+
+  const generatePassword = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%'
+    let pwd = ''
+    for (let i = 0; i < 16; i++) {
+      pwd += chars.charAt(Math.floor(Math.random() * chars.length))
+    }
+    update('password', pwd)
+    setShowPassword(true)
+  }
 
   const handleSubmit = async () => {
     if (!form.username || !form.password || !form.firstName) {
@@ -1070,7 +1228,35 @@ function CreateUserModal({ onClose, onSuccess, onError }) {
         <Input label="Email"        type="email" value={form.email} onChange={v => update('email', v)} />
         <Input label="Department"   value={form.department}  onChange={v => update('department', v)} />
         <Input label="Job Title"    value={form.title}       onChange={v => update('title', v)} />
-        <Input label="Password *"   type="password" value={form.password} onChange={v => update('password', v)} />
+
+        <div>
+          <label className="block text-sm text-slate-400 mb-1">Password *</label>
+          <div className="relative">
+            <input
+              type={showPassword ? "text" : "password"}
+              value={form.password}
+              onChange={(e) => update('password', e.target.value)}
+              className="w-full px-3 py-2 pr-24 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500"
+            />
+            <div className="absolute right-1 top-1/2 -translate-y-1/2 flex gap-1">
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="p-1 hover:bg-slate-700 rounded text-slate-400"
+              >
+                {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+              <button
+                type="button"
+                onClick={generatePassword}
+                className="px-2 py-0.5 text-xs bg-purple-600 hover:bg-purple-700 rounded text-white"
+              >
+                Gen
+              </button>
+            </div>
+          </div>
+        </div>
+
         <div className="md:col-span-2">
           <label className="block text-sm text-slate-400 mb-2">Target OU</label>
           <select value={form.ou} onChange={(e) => update('ou', e.target.value)}
@@ -1101,7 +1287,7 @@ function CreateUserModal({ onClose, onSuccess, onError }) {
 }
 
 // ─────────────────────────────────────────────────────────
-// Bulk Import Modal (Create new users)
+// Bulk Import Modal
 // ─────────────────────────────────────────────────────────
 function BulkImportModal({ onClose, onSuccess, onError }) {
   const [csvText, setCsvText]     = useState('')
