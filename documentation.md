@@ -1931,6 +1931,68 @@ domain DN.
     REM GPO links
     dsacls "DC=company,DC=local" /I:S /G "DOMAIN\svc-admanager:RP;gPLink;"
 
+## Bulk Operations Field Reference
+
+### Bulk Import CSV Fields
+
+The Bulk Import feature accepts these columns for creating new users:
+
+Required Fields:
+- username - The AD sAMAccountName (login name)
+- password - Initial password minimum 8 characters
+
+Recommended Fields:
+- firstName - Given name
+- lastName - Surname
+
+Optional Fields:
+- displayName - Full display name (auto-filled from firstName + lastName if blank)
+- email - Email address (auto-filled as username@domain if blank)
+- department - Department name
+- title - Job title
+- company - Company name
+- office - Office location
+- phone - Telephone number
+- description - Description
+- ou - Full DN of target OU (uses default OU if blank)
+- upn - User Principal Name (auto-generated as username@domain if blank)
+
+### Bulk Update CSV Fields
+
+The Bulk Update feature accepts these columns for updating existing users:
+
+Required Field:
+- username (aliases: user, samaccountname) - Used to find the user in AD
+
+Updatable Fields (all optional, empty cells are skipped):
+- firstname (aliases: first_name, givenname) - First name
+- lastname (aliases: last_name, surname, sn) - Last name
+- displayname (alias: display_name) - Display name
+- email (alias: mail) - Email address
+- department (alias: dept) - Department
+- title (aliases: jobtitle, job_title) - Job title
+- company - Company name
+- office - Office location
+- phone (alias: telephone) - Phone number
+- description - Description
+- manager - Manager Distinguished Name
+
+Fields Not Supported in Bulk Update:
+- password - Use the Bulk Reset Password action instead
+- ou - Use the Bulk Move action to change user location
+- upn - Use the Edit User modal for individual UPN changes
+- passwordNeverExpires - Use the Edit User modal
+- accountDisabled - Use the Bulk Enable or Bulk Disable actions
+- memberOf - Manage group membership through the Groups page
+- thumbnailPhoto - Use the Photos page for photo management
+
+Rules:
+1. Column names are case-insensitive
+2. Empty cells are ignored - the existing AD value is preserved
+3. Users must already exist in AD - non-existent users appear as errors
+4. Extra columns not in the supported list are ignored silently
+5. The system uses the first matching alias for each column
+
 # DOCUMENT METADATA
 
 Document Version: 2.2.2

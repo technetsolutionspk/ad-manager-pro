@@ -3,7 +3,7 @@ import {
   Search, Lock, Unlock, KeyRound, UserX, UserCheck,
   RefreshCw, X, UserPlus, Upload, Download, Edit, Trash2,
   Move, CheckSquare, Square, MoreVertical, Filter, FileText,
-  Eye, EyeOff
+  Eye, EyeOff, ArrowUpDown, ArrowUp, ArrowDown
 } from 'lucide-react'
 import {
   getUsers, disableUser, enableUser, unlockUser, resetPassword,
@@ -36,6 +36,10 @@ export default function Users() {
   const [showBulkModify, setShowBulkModify]   = useState(false)
   const [showBulkReset, setShowBulkReset]     = useState(false)
   const [statusFilter, setStatusFilter]       = useState('all')
+
+  // ── Sorting state ──
+  const [sortBy, setSortBy]         = useState('displayName')
+  const [sortOrder, setSortOrder]   = useState('asc')
 
   useEffect(() => { loadUsers() }, [])
 
@@ -137,10 +141,10 @@ export default function Users() {
   }
 
   const toggleSelectAll = () => {
-    if (selectedUsers.size === filteredUsers.length) {
+    if (selectedUsers.size === filteredAndSortedUsers.length) {
       setSelectedUsers(new Set())
     } else {
-      setSelectedUsers(new Set(filteredUsers.map(u => u.username)))
+      setSelectedUsers(new Set(filteredAndSortedUsers.map(u => u.username)))
     }
   }
 
@@ -162,9 +166,80 @@ export default function Users() {
     }
   }
 
+  // ── Sorting handler ──
+  const handleSort = (column) => {
+    if (sortBy === column) {
+      // Same column - toggle order
+      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
+    } else {
+      // Different column - set new column and default to ascending
+      setSortBy(column)
+      setSortOrder('asc')
+    }
+  }
+
+  // ── Filter + Sort ──
   const filteredUsers = statusFilter === 'all'
     ? users
     : users.filter(u => u.status === statusFilter)
+
+  const filteredAndSortedUsers = [...filteredUsers].sort((a, b) => {
+    let valA = ''
+    let valB = ''
+
+    switch (sortBy) {
+      case 'displayName':
+        valA = (a.displayName || a.username || '').toLowerCase()
+        valB = (b.displayName || b.username || '').toLowerCase()
+        break
+      case 'username':
+        valA = (a.username || '').toLowerCase()
+        valB = (b.username || '').toLowerCase()
+        break
+      case 'email':
+        valA = (a.email || '').toLowerCase()
+        valB = (b.email || '').toLowerCase()
+        break
+      case 'department':
+        valA = (a.department || '').toLowerCase()
+        valB = (b.department || '').toLowerCase()
+        break
+      case 'status':
+        // Custom order: active, locked, disabled
+        const statusOrder = { active: 1, locked: 2, disabled: 3 }
+        valA = statusOrder[a.status] || 99
+        valB = statusOrder[b.status] || 99
+        break
+      default:
+        return 0
+    }
+
+    if (valA < valB) return sortOrder === 'asc' ? -1 : 1
+    if (valA > valB) return sortOrder === 'asc' ? 1 : -1
+    return 0
+  })
+
+  // ── Sortable Column Header Component ──
+  const SortableHeader = ({ column, label, className = '' }) => {
+    const isActive = sortBy === column
+    return (
+      <th className={`p-4 ${className}`}>
+        <button
+          onClick={() => handleSort(column)}
+          className="flex items-center gap-1.5 hover:text-blue-400 transition uppercase text-xs font-semibold"
+        >
+          {label}
+          {isActive ? (
+            sortOrder === 'asc'
+              ? <ArrowUp size={12} className="text-blue-400" />
+              : <ArrowDown size={12} className="text-blue-400" />
+          ) : (
+            <ArrowUpDown size={12} className="text-slate-500 opacity-50" />
+          )}
+        </button>
+      </th>
+    )
+  }
 
   return (
     <div className="p-8">
@@ -173,9 +248,14 @@ export default function Users() {
         <div>
           <h1 className="text-3xl font-bold mb-1">Users</h1>
           <p className="text-slate-400">
-            {filteredUsers.length} of {users.length} users
+            {filteredAndSortedUsers.length} of {users.length} users
             {selectedUsers.size > 0 && (
               <span className="ml-2 text-blue-400">• {selectedUsers.size} selected</span>
+            )}
+            {sortBy && (
+              <span className="ml-2 text-slate-500 text-xs">
+                • Sorted by {sortBy} ({sortOrder === 'asc' ? 'A-Z' : 'Z-A'})
+              </span>
             )}
           </p>
         </div>
@@ -279,12 +359,13 @@ export default function Users() {
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="bg-transparent py-2 focus:outline-none cursor-pointer"
+            className="bg-slate-800 text-white py-2 focus:outline-none cursor-pointer"
+            style={{ colorScheme: 'dark' }}
           >
-            <option value="all">All Status</option>
-            <option value="active">Active</option>
-            <option value="disabled">Disabled</option>
-            <option value="locked">Locked</option>
+            <option value="all" className="bg-slate-800 text-white">All Status</option>
+            <option value="active" className="bg-slate-800 text-white">Active</option>
+            <option value="disabled" className="bg-slate-800 text-white">Disabled</option>
+            <option value="locked" className="bg-slate-800 text-white">Locked</option>
           </select>
         </div>
       </div>
@@ -294,19 +375,19 @@ export default function Users() {
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead className="bg-slate-900">
-              <tr className="text-left text-xs uppercase text-slate-400">
+              <tr className="text-left text-slate-400">
                 <th className="p-4 w-10">
                   <button onClick={toggleSelectAll} className="hover:text-blue-400">
-                    {selectedUsers.size === filteredUsers.length && filteredUsers.length > 0
+                    {selectedUsers.size === filteredAndSortedUsers.length && filteredAndSortedUsers.length > 0
                       ? <CheckSquare size={18} className="text-blue-400" />
                       : <Square size={18} />}
                   </button>
                 </th>
-                <th className="p-4">User</th>
-                <th className="p-4">Email</th>
-                <th className="p-4">Department</th>
-                <th className="p-4">Status</th>
-                <th className="p-4 text-right">Actions</th>
+                <SortableHeader column="displayName" label="User" />
+                <SortableHeader column="email" label="Email" />
+                <SortableHeader column="department" label="Department" />
+                <SortableHeader column="status" label="Status" />
+                <th className="p-4 text-right text-xs uppercase font-semibold">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-700">
@@ -317,12 +398,12 @@ export default function Users() {
                     Loading users...
                   </td>
                 </tr>
-              ) : filteredUsers.length === 0 ? (
+              ) : filteredAndSortedUsers.length === 0 ? (
                 <tr>
                   <td colSpan="6" className="p-8 text-center text-slate-500">No users found</td>
                 </tr>
               ) : (
-                filteredUsers.map(u => (
+                filteredAndSortedUsers.map(u => (
                   <tr
                     key={u.id}
                     className={`hover:bg-slate-700/30 ${selectedUsers.has(u.username) ? 'bg-blue-500/10' : ''}`}
@@ -424,7 +505,6 @@ export default function Users() {
             Resetting password for <span className="text-white font-medium">{selected.username}</span>
           </p>
 
-          {/* Password input with show/hide and generate */}
           <div className="relative mb-4">
             <input
               type={showPassword ? "text" : "password"}
@@ -460,7 +540,6 @@ export default function Users() {
             </p>
           )}
 
-          {/* Options */}
           <div className="space-y-2 mb-4">
             <label className="flex items-center gap-3 p-3 bg-slate-900 rounded-lg cursor-pointer hover:bg-slate-800 transition">
               <input
