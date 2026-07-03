@@ -1,0 +1,1586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AD Manager Pro v2.2.2 - Feature Presentation</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: #0f172a;
+        color: #f1f5f9;
+        overflow: hidden;
+        height: 100vh;
+    }
+
+    .presentation {
+        width: 100vw;
+        height: 100vh;
+        position: relative;
+    }
+
+    .slide {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        padding: 60px 80px;
+        display: none;
+        flex-direction: column;
+        overflow-y: auto;
+        animation: fadeIn 0.4s ease;
+    }
+
+    .slide.active { display: flex; }
+
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateX(20px); }
+        to { opacity: 1; transform: translateX(0); }
+    }
+
+    /* Title slide */
+    .slide-title {
+        justify-content: center;
+        align-items: center;
+        text-align: center;
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+    }
+
+    .slide-title h1 {
+        font-size: 5em;
+        background: linear-gradient(135deg, #60a5fa, #a78bfa, #f472b6);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        margin-bottom: 20px;
+        font-weight: 800;
+    }
+
+    .slide-title .version {
+        font-size: 1.5em;
+        color: #64748b;
+        margin-bottom: 40px;
+    }
+
+    .slide-title .subtitle {
+        font-size: 2em;
+        color: #94a3b8;
+        margin-bottom: 30px;
+        font-weight: 300;
+    }
+
+    .slide-title .description {
+        font-size: 1.2em;
+        color: #cbd5e1;
+        max-width: 700px;
+        line-height: 1.6;
+    }
+
+    .slide-title .footer-info {
+        margin-top: 60px;
+        padding: 20px 40px;
+        background: rgba(59, 130, 246, 0.1);
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        border-radius: 12px;
+        color: #93c5fd;
+    }
+
+    /* Regular slides */
+    .slide h2 {
+        font-size: 2.8em;
+        color: #60a5fa;
+        margin-bottom: 30px;
+        padding-bottom: 20px;
+        border-bottom: 3px solid #1e40af;
+        display: flex;
+        align-items: center;
+        gap: 15px;
+    }
+
+    .slide h2 .emoji { font-size: 1em; }
+
+    .slide h3 {
+        font-size: 1.5em;
+        color: #a78bfa;
+        margin: 25px 0 15px 0;
+    }
+
+    .slide-content {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+    }
+
+    .slide-columns {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 40px;
+    }
+
+    .slide-columns-3 {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 30px;
+    }
+
+    .card {
+        background: #1e293b;
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 25px;
+    }
+
+    .card-blue { border-left: 4px solid #3b82f6; }
+    .card-green { border-left: 4px solid #22c55e; }
+    .card-purple { border-left: 4px solid #a855f7; }
+    .card-orange { border-left: 4px solid #f97316; }
+    .card-red { border-left: 4px solid #ef4444; }
+    .card-yellow { border-left: 4px solid #eab308; }
+    .card-cyan { border-left: 4px solid #06b6d4; }
+    .card-pink { border-left: 4px solid #ec4899; }
+
+    .card h4 {
+        font-size: 1.3em;
+        margin-bottom: 15px;
+        color: #f1f5f9;
+    }
+
+    ul {
+        list-style: none;
+        padding: 0;
+    }
+
+    li {
+        padding: 8px 0;
+        color: #cbd5e1;
+        font-size: 1.05em;
+        line-height: 1.5;
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+    }
+
+    li .check {
+        color: #22c55e;
+        font-weight: bold;
+        flex-shrink: 0;
+        margin-top: 2px;
+    }
+
+    li .bullet {
+        color: #60a5fa;
+        flex-shrink: 0;
+    }
+
+    .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 20px;
+        margin: 20px 0;
+    }
+
+    .stat-card {
+        background: linear-gradient(135deg, #1e293b, #0f172a);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 25px;
+        text-align: center;
+    }
+
+    .stat-card .value {
+        font-size: 2.5em;
+        font-weight: bold;
+        margin-bottom: 8px;
+    }
+
+    .stat-card .label {
+        color: #94a3b8;
+        font-size: 0.95em;
+    }
+
+    .badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 6px;
+        font-size: 0.85em;
+        font-weight: 600;
+        margin-right: 8px;
+    }
+
+    .badge-blue { background: rgba(59, 130, 246, 0.2); color: #93c5fd; }
+    .badge-green { background: rgba(34, 197, 94, 0.2); color: #86efac; }
+    .badge-purple { background: rgba(168, 85, 247, 0.2); color: #c4b5fd; }
+    .badge-red { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
+    .badge-orange { background: rgba(249, 115, 22, 0.2); color: #fdba74; }
+    .badge-yellow { background: rgba(234, 179, 8, 0.2); color: #fde047; }
+
+    code {
+        background: #0f172a;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-family: 'Courier New', monospace;
+        color: #86efac;
+        font-size: 0.9em;
+    }
+
+    .code-block {
+        background: #020617;
+        border: 1px solid #1e293b;
+        border-radius: 8px;
+        padding: 20px;
+        font-family: 'Courier New', monospace;
+        color: #86efac;
+        font-size: 1em;
+        margin: 15px 0;
+        overflow-x: auto;
+    }
+
+    .feature-list {
+        columns: 2;
+        column-gap: 40px;
+    }
+
+    .feature-list li { break-inside: avoid; }
+
+    /* Navigation */
+    .nav {
+        position: fixed;
+        bottom: 30px;
+        right: 30px;
+        display: flex;
+        gap: 15px;
+        z-index: 100;
+    }
+
+    .nav button {
+        background: rgba(30, 41, 59, 0.9);
+        border: 1px solid #475569;
+        color: #f1f5f9;
+        width: 50px;
+        height: 50px;
+        border-radius: 50%;
+        cursor: pointer;
+        font-size: 1.3em;
+        transition: all 0.2s;
+        backdrop-filter: blur(10px);
+    }
+
+    .nav button:hover {
+        background: #3b82f6;
+        border-color: #3b82f6;
+        transform: scale(1.1);
+    }
+
+    .nav button:disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
+    }
+
+    .slide-counter {
+        position: fixed;
+        bottom: 30px;
+        left: 30px;
+        background: rgba(30, 41, 59, 0.9);
+        border: 1px solid #475569;
+        color: #f1f5f9;
+        padding: 10px 20px;
+        border-radius: 25px;
+        font-size: 0.95em;
+        backdrop-filter: blur(10px);
+        z-index: 100;
+    }
+
+    .progress-bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 4px;
+        background: linear-gradient(90deg, #3b82f6, #a78bfa, #ec4899);
+        transition: width 0.3s ease;
+        z-index: 200;
+    }
+
+    .keyboard-hint {
+        position: fixed;
+        top: 30px;
+        right: 30px;
+        background: rgba(30, 41, 59, 0.9);
+        border: 1px solid #475569;
+        color: #94a3b8;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-size: 0.85em;
+        backdrop-filter: blur(10px);
+        z-index: 100;
+    }
+
+    .highlight-box {
+        background: rgba(59, 130, 246, 0.1);
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        border-radius: 8px;
+        padding: 20px;
+        margin: 15px 0;
+    }
+
+    .highlight-box h4 {
+        color: #93c5fd;
+        margin-bottom: 10px;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 15px 0;
+    }
+
+    th, td {
+        padding: 12px;
+        text-align: left;
+        border-bottom: 1px solid #334155;
+    }
+
+    th {
+        background: #1e293b;
+        color: #94a3b8;
+        font-weight: 600;
+    }
+
+    td { color: #cbd5e1; }
+
+    tr:hover { background: rgba(59, 130, 246, 0.05); }
+
+    .thank-you {
+        justify-content: center;
+        align-items: center;
+        text-align: center;
+    }
+
+    .thank-you h1 {
+        font-size: 8em;
+        background: linear-gradient(135deg, #60a5fa, #a78bfa, #f472b6, #fbbf24);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 40px;
+        font-weight: 800;
+    }
+
+    .thank-you .grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 30px;
+        margin: 40px 0;
+        max-width: 900px;
+    }
+
+    .thank-you .grid-item {
+        background: rgba(30, 41, 59, 0.5);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 20px;
+        font-size: 1.1em;
+    }
+
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<div class="progress-bar" id="progressBar"></div>
+<div class="keyboard-hint">← → Arrow keys | Space | Click nav</div>
+
+<div class="presentation">
+
+<!-- Slide 1: Title -->
+<div class="slide slide-title active">
+    <h1>AD Manager Pro</h1>
+    <div class="version">v2.2.2</div>
+    <div class="subtitle">Enterprise Active Directory Management Platform</div>
+    <div class="description">
+        Modern web-based AD administration for Windows domain environments.
+        Manage users, groups, computers, and OUs from any browser with complete
+        audit logging and role-based access control.
+    </div>
+    <div class="footer-info">
+        Built with Python FastAPI + React + Tailwind CSS
+    </div>
+</div>
+
+<!-- Slide 2: Executive Summary -->
+<div class="slide">
+    <h2>Executive Summary</h2>
+    <div class="slide-content">
+        <div class="highlight-box">
+            <h4>What is AD Manager Pro?</h4>
+            <p>A complete browser-based platform that replaces ADUC with a modern, intuitive web interface accessible from any device.</p>
+        </div>
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>Key Benefits</h4>
+                <ul>
+                    <li><span class="check">✓</span> Access from any browser on any device</li>
+                    <li><span class="check">✓</span> No client software installation required</li>
+                    <li><span class="check">✓</span> Complete audit trail of all changes</li>
+                    <li><span class="check">✓</span> Role-based access for delegation</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>Enterprise Features</h4>
+                <ul>
+                    <li><span class="check">✓</span> Bulk operations save hours of work</li>
+                    <li><span class="check">✓</span> Real-time reports and analytics</li>
+                    <li><span class="check">✓</span> Modern dark-themed responsive UI</li>
+                    <li><span class="check">✓</span> Enterprise-grade security</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 3: Technology Stack -->
+<div class="slide">
+    <h2>Technology Stack</h2>
+    <div class="slide-content">
+        <div class="slide-columns-3">
+            <div class="card card-blue">
+                <h4>🖥️ Frontend</h4>
+                <ul>
+                    <li><span class="bullet">•</span> React 18</li>
+                    <li><span class="bullet">•</span> Vite build tool</li>
+                    <li><span class="bullet">•</span> Tailwind CSS v3</li>
+                    <li><span class="bullet">•</span> Recharts</li>
+                    <li><span class="bullet">•</span> Axios HTTP client</li>
+                    <li><span class="bullet">•</span> React Router v6</li>
+                    <li><span class="bullet">•</span> Lucide React icons</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>⚙️ Backend</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Python 3.11+</li>
+                    <li><span class="bullet">•</span> FastAPI framework</li>
+                    <li><span class="bullet">•</span> Uvicorn ASGI server</li>
+                    <li><span class="bullet">•</span> ldap3 library</li>
+                    <li><span class="bullet">•</span> SQLAlchemy ORM</li>
+                    <li><span class="bullet">•</span> JWT authentication</li>
+                    <li><span class="bullet">•</span> Fernet AES encryption</li>
+                </ul>
+            </div>
+            <div class="card card-purple">
+                <h4>💾 Data & Infra</h4>
+                <ul>
+                    <li><span class="bullet">•</span> SQLite database</li>
+                    <li><span class="bullet">•</span> Windows Server</li>
+                    <li><span class="bullet">•</span> Windows Task Scheduler</li>
+                    <li><span class="bullet">•</span> LDAP/LDAPS protocols</li>
+                    <li><span class="bullet">•</span> Zero-config deployment</li>
+                    <li><span class="bullet">•</span> HTTP port 8080</li>
+                    <li><span class="bullet">•</span> Auto-restart on failure</li>
+                </ul>
+            </div>
+        </div>
+        <div class="highlight-box">
+            <h4>Architecture Flow</h4>
+            <p>Browser → FastAPI Backend → Active Directory (LDAP)</p>
+            <p>All data stored in local SQLite. No external dependencies required.</p>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 4: Feature Categories -->
+<div class="slide">
+    <h2>18 Feature Modules</h2>
+    <div class="slide-content">
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>👥 Identity Management</h4>
+                <ul>
+                    <li><span class="bullet">1.</span> User Management</li>
+                    <li><span class="bullet">2.</span> Group Management</li>
+                    <li><span class="bullet">3.</span> Computer Management</li>
+                    <li><span class="bullet">4.</span> OU Management</li>
+                    <li><span class="bullet">5.</span> Service Accounts</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>⚡ Automation</h4>
+                <ul>
+                    <li><span class="bullet">6.</span> User Templates</li>
+                    <li><span class="bullet">7.</span> Approval Workflows</li>
+                    <li><span class="bullet">8.</span> Bulk Import CSV</li>
+                    <li><span class="bullet">9.</span> Bulk Update CSV</li>
+                </ul>
+            </div>
+            <div class="card card-purple">
+                <h4>📊 Monitoring</h4>
+                <ul>
+                    <li><span class="bullet">10.</span> GPO Viewing</li>
+                    <li><span class="bullet">11.</span> Session Tracking</li>
+                    <li><span class="bullet">12.</span> Audit Logging</li>
+                    <li><span class="bullet">13.</span> Reports Dashboard</li>
+                </ul>
+            </div>
+            <div class="card card-orange">
+                <h4>🔧 Administration</h4>
+                <ul>
+                    <li><span class="bullet">14.</span> Settings</li>
+                    <li><span class="bullet">15.</span> App User Management</li>
+                    <li><span class="bullet">16.</span> Photo Management</li>
+                    <li><span class="bullet">17.</span> Object Filtering</li>
+                    <li><span class="bullet">18.</span> Auto Installer</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 5: User Management -->
+<div class="slide">
+    <h2>User Management</h2>
+    <div class="slide-content">
+        <p style="color: #94a3b8; font-size: 1.1em;">Complete user lifecycle management with advanced features</p>
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>Individual Operations</h4>
+                <ul>
+                    <li><span class="check">✓</span> Create users with full attributes</li>
+                    <li><span class="check">✓</span> Edit all AD attributes</li>
+                    <li><span class="check">✓</span> Delete (Admin only)</li>
+                    <li><span class="check">✓</span> Move between OUs</li>
+                    <li><span class="check">✓</span> Enable/Disable accounts</li>
+                    <li><span class="check">✓</span> Unlock locked accounts</li>
+                    <li><span class="check">✓</span> Reset passwords</li>
+                    <li><span class="check">✓</span> Generate strong passwords</li>
+                </ul>
+            </div>
+            <div class="card card-purple">
+                <h4>Bulk Operations</h4>
+                <ul>
+                    <li><span class="check">✓</span> Enable/Disable multiple users</li>
+                    <li><span class="check">✓</span> Unlock multiple accounts</li>
+                    <li><span class="check">✓</span> Reset passwords (batch)</li>
+                    <li><span class="check">✓</span> Move to OU with progress</li>
+                    <li><span class="check">✓</span> Bulk modify attributes</li>
+                    <li><span class="check">✓</span> Bulk delete (Admin only)</li>
+                    <li><span class="check">✓</span> Sortable columns</li>
+                    <li><span class="check">✓</span> Real-time search & filter</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 6: Bulk CSV Operations -->
+<div class="slide">
+    <h2>Bulk CSV Operations</h2>
+    <div class="slide-content">
+        <p style="color: #94a3b8; font-size: 1.1em;">Save hours by uploading CSV files for mass operations</p>
+        <div class="slide-columns">
+            <div class="card card-green">
+                <h4>Bulk Import - Create New Users</h4>
+                <p style="color: #94a3b8; margin-bottom: 15px;">Create hundreds of users in seconds</p>
+                <ul>
+                    <li><span class="check">✓</span> Upload CSV or paste text</li>
+                    <li><span class="check">✓</span> Preview before importing</li>
+                    <li><span class="check">✓</span> Auto-fills missing fields</li>
+                    <li><span class="check">✓</span> Downloadable template</li>
+                    <li><span class="check">✓</span> Error report per row</li>
+                    <li><span class="check">✓</span> 14 supported fields</li>
+                </ul>
+            </div>
+            <div class="card card-orange">
+                <h4>Bulk Update - Modify Existing</h4>
+                <p style="color: #94a3b8; margin-bottom: 15px;">Export → Edit → Re-import workflow</p>
+                <ul>
+                    <li><span class="check">✓</span> Case-insensitive columns</li>
+                    <li><span class="check">✓</span> Column name aliases supported</li>
+                    <li><span class="check">✓</span> Empty cells preserve values</li>
+                    <li><span class="check">✓</span> Preview with error preview</li>
+                    <li><span class="check">✓</span> Detailed results report</li>
+                    <li><span class="check">✓</span> 12 updatable fields</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 7: Group Management -->
+<div class="slide">
+    <h2>Group Management</h2>
+    <div class="slide-content">
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>Group Operations</h4>
+                <ul>
+                    <li><span class="check">✓</span> Create security groups</li>
+                    <li><span class="check">✓</span> Create distribution groups</li>
+                    <li><span class="check">✓</span> Global scope</li>
+                    <li><span class="check">✓</span> Domain-Local scope</li>
+                    <li><span class="check">✓</span> Universal scope</li>
+                    <li><span class="check">✓</span> Delete groups (Admin)</li>
+                    <li><span class="check">✓</span> 35+ built-in protected</li>
+                </ul>
+            </div>
+            <div class="card card-purple">
+                <h4>Member Management</h4>
+                <ul>
+                    <li><span class="check">✓</span> View all members</li>
+                    <li><span class="check">✓</span> Add by searching AD users</li>
+                    <li><span class="check">✓</span> Remove with one click</li>
+                    <li><span class="check">✓</span> See enabled/disabled status</li>
+                    <li><span class="check">✓</span> Member count per group</li>
+                    <li><span class="check">✓</span> Card-based grid layout</li>
+                    <li><span class="check">✓</span> Search by name</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 8: Computer Management -->
+<div class="slide">
+    <h2>Computer Management</h2>
+    <div class="slide-content">
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>Operations</h4>
+                <ul>
+                    <li><span class="check">✓</span> View all domain computers</li>
+                    <li><span class="check">✓</span> Create accounts (Admin)</li>
+                    <li><span class="check">✓</span> Delete (Admin only)</li>
+                    <li><span class="check">✓</span> Enable/Disable</li>
+                    <li><span class="check">✓</span> Move between OUs</li>
+                    <li><span class="check">✓</span> Bulk with progress bar</li>
+                    <li><span class="check">✓</span> CSV export</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>Information Shown</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Computer name & description</li>
+                    <li><span class="bullet">•</span> Operating System & version</li>
+                    <li><span class="bullet">•</span> DNS hostname</li>
+                    <li><span class="bullet">•</span> Last logon date</li>
+                    <li><span class="bullet">•</span> Status (Active/Inactive/Disabled)</li>
+                    <li><span class="bullet">•</span> Managed by (owner)</li>
+                    <li><span class="bullet">•</span> Full OU path</li>
+                </ul>
+            </div>
+        </div>
+        <div class="highlight-box">
+            <h4>Smart Features</h4>
+            <p>Auto-detect inactive computers (90+ days no login) • Auto-uppercase name entry • Name validation (max 15 chars, alphanumeric + hyphens)</p>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 9: OU Management -->
+<div class="slide">
+    <h2>OU Management</h2>
+    <div class="slide-content">
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>OU Operations</h4>
+                <ul>
+                    <li><span class="check">✓</span> Browse all OUs</li>
+                    <li><span class="check">✓</span> Create under any parent</li>
+                    <li><span class="check">✓</span> Delete empty (Admin)</li>
+                    <li><span class="check">✓</span> Update descriptions</li>
+                    <li><span class="check">✓</span> Full DN preview</li>
+                    <li><span class="check">✓</span> Real-time search</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>OU Browser</h4>
+                <p style="color: #94a3b8; margin-bottom: 10px;">Click any OU to see:</p>
+                <ul>
+                    <li><span class="bullet">📁</span> Users (blue icon)</li>
+                    <li><span class="bullet">👥</span> Groups (green icon)</li>
+                    <li><span class="bullet">💻</span> Computers (purple icon)</li>
+                    <li><span class="bullet">📂</span> Sub-OUs (orange icon)</li>
+                </ul>
+            </div>
+        </div>
+        <div class="stat-grid">
+            <div class="stat-card">
+                <div class="value" style="color: #3b82f6;">📁</div>
+                <div class="label">Users Tab</div>
+            </div>
+            <div class="stat-card">
+                <div class="value" style="color: #22c55e;">👥</div>
+                <div class="label">Groups Tab</div>
+            </div>
+            <div class="stat-card">
+                <div class="value" style="color: #a855f7;">💻</div>
+                <div class="label">Computers Tab</div>
+            </div>
+            <div class="stat-card">
+                <div class="value" style="color: #f97316;">📂</div>
+                <div class="label">Sub-OUs Tab</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 10: Service Accounts -->
+<div class="slide">
+    <h2>Service Accounts</h2>
+    <div class="slide-content">
+        <div class="highlight-box">
+            <h4>🔒 Dual Tracking - AD + Application Database</h4>
+            <p>Creates in BOTH Active Directory AND the app database simultaneously. Automatic rollback if either step fails. Full metadata beyond what AD stores.</p>
+        </div>
+        <div class="slide-columns">
+            <div class="card card-red">
+                <h4>Creation Features</h4>
+                <ul>
+                    <li><span class="check">✓</span> Password 12+ characters</li>
+                    <li><span class="check">✓</span> Built-in generator (20 chars)</li>
+                    <li><span class="check">✓</span> Password never expires</li>
+                    <li><span class="check">✓</span> Cannot change password</li>
+                    <li><span class="check">✓</span> System critical flag</li>
+                    <li><span class="check">✓</span> Purpose documentation</li>
+                    <li><span class="check">✓</span> Owner tracking</li>
+                </ul>
+            </div>
+            <div class="card card-purple">
+                <h4>App Access Integration</h4>
+                <ul>
+                    <li><span class="check">✓</span> Grant web interface access</li>
+                    <li><span class="check">✓</span> Choose role (Admin/Helpdesk/Viewer)</li>
+                    <li><span class="check">✓</span> Auto-creates app_users entry</li>
+                    <li><span class="check">✓</span> Import existing AD users</li>
+                    <li><span class="check">✓</span> Notes field for details</li>
+                    <li><span class="check">✓</span> Filter by category</li>
+                    <li><span class="check">✓</span> Last password change tracking</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 11: User Templates -->
+<div class="slide">
+    <h2>User Templates</h2>
+    <div class="slide-content">
+        <div class="highlight-box">
+            <h4>Why Templates?</h4>
+            <p>Consistent onboarding by role. No more forgotten group memberships or missing attributes. Junior staff can create users following your standards.</p>
+        </div>
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>Create Template</h4>
+                <ul>
+                    <li><span class="bullet">📝</span> Template name & description</li>
+                    <li><span class="bullet">📁</span> Target OU</li>
+                    <li><span class="bullet">💼</span> Department, title, company</li>
+                    <li><span class="bullet">📍</span> Office, phone, manager</li>
+                    <li><span class="bullet">👥</span> Multi-select AD groups</li>
+                    <li><span class="bullet">🔒</span> Password policy options</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>Use Template</h4>
+                <p style="color: #94a3b8; margin-bottom: 10px;">Only enter unique info:</p>
+                <ul>
+                    <li><span class="check">✓</span> Username</li>
+                    <li><span class="check">✓</span> First & last name</li>
+                    <li><span class="check">✓</span> Email</li>
+                    <li><span class="check">✓</span> Password</li>
+                </ul>
+                <p style="color: #86efac; margin-top: 15px; font-weight: 600;">Everything else from template + auto-add to groups</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 12: Approval Workflows -->
+<div class="slide">
+    <h2>Approval Workflows</h2>
+    <div class="slide-content">
+        <p style="color: #94a3b8; font-size: 1.1em;">Enterprise approval system with 6 request types</p>
+        <div class="stat-grid">
+            <div class="stat-card"><div class="value">✏️</div><div class="label">Modify User</div></div>
+            <div class="stat-card"><div class="value">➕</div><div class="label">Create User</div></div>
+            <div class="stat-card"><div class="value">🗑️</div><div class="label">Delete User</div></div>
+            <div class="stat-card"><div class="value">🔑</div><div class="label">Reset Password</div></div>
+        </div>
+        <div class="slide-columns">
+            <div class="card card-yellow">
+                <h4>Workflow Process</h4>
+                <ul>
+                    <li><span class="bullet">1.</span> Helpdesk submits request with reason</li>
+                    <li><span class="bullet">2.</span> Admin sees pending badge</li>
+                    <li><span class="bullet">3.</span> Admin reviews details + payload</li>
+                    <li><span class="bullet">4.</span> Approve OR Reject with reason</li>
+                    <li><span class="bullet">5.</span> Auto-execution in AD on approve</li>
+                    <li><span class="bullet">6.</span> Complete audit trail</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>Status Filters</h4>
+                <p><span class="badge badge-yellow">Pending</span> Awaiting approval</p>
+                <p><span class="badge badge-green">Approved</span> Approved but not executed</p>
+                <p><span class="badge badge-blue">Completed</span> Executed successfully</p>
+                <p><span class="badge badge-red">Rejected</span> Denied with reason</p>
+                <p style="margin-top: 15px; color: #86efac;">🔔 Pending count badge auto-refreshes every 30 seconds</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 13: GPO Viewing -->
+<div class="slide">
+    <h2>GPO Viewing (Read-Only)</h2>
+    <div class="slide-content">
+        <div class="slide-columns">
+            <div class="card card-purple">
+                <h4>GPO Information</h4>
+                <ul>
+                    <li><span class="check">✓</span> View all Group Policy Objects</li>
+                    <li><span class="check">✓</span> GUID, version, status</li>
+                    <li><span class="check">✓</span> User settings enabled/disabled</li>
+                    <li><span class="check">✓</span> Computer settings status</li>
+                    <li><span class="check">✓</span> Created & modified dates</li>
+                    <li><span class="check">✓</span> SYSVOL path</li>
+                    <li><span class="check">✓</span> Distinguished Name</li>
+                </ul>
+            </div>
+            <div class="card card-blue">
+                <h4>OU Links Tab</h4>
+                <ul>
+                    <li><span class="check">✓</span> Which OUs have which GPOs</li>
+                    <li><span class="check">✓</span> Enforced status</li>
+                    <li><span class="check">✓</span> Enabled/Disabled per link</li>
+                    <li><span class="check">✓</span> Count per OU</li>
+                    <li><span class="check">✓</span> Search by name or GUID</li>
+                    <li><span class="check">✓</span> Filter by status</li>
+                    <li><span class="check">✓</span> CSV export</li>
+                </ul>
+            </div>
+        </div>
+        <div class="stat-grid">
+            <div class="stat-card"><div class="value" style="color: #a855f7;">📊</div><div class="label">Total GPOs</div></div>
+            <div class="stat-card"><div class="value" style="color: #22c55e;">✅</div><div class="label">Enabled</div></div>
+            <div class="stat-card"><div class="value" style="color: #ef4444;">❌</div><div class="label">Disabled</div></div>
+            <div class="stat-card"><div class="value" style="color: #3b82f6;">🔗</div><div class="label">Linked</div></div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 14: User Photos -->
+<div class="slide">
+    <h2>User Photo Management</h2>
+    <div class="slide-content">
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>Upload Features</h4>
+                <ul>
+                    <li><span class="check">✓</span> Click to browse or drag-drop</li>
+                    <li><span class="check">✓</span> Center-crop to square</li>
+                    <li><span class="check">✓</span> Resize to 200x200 pixels</li>
+                    <li><span class="check">✓</span> Compress to under 100KB</li>
+                    <li><span class="check">✓</span> Side-by-side preview</li>
+                    <li><span class="check">✓</span> Progressive JPEG quality</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>Display & Management</h4>
+                <ul>
+                    <li><span class="check">✓</span> Responsive grid (2-6 cols)</li>
+                    <li><span class="check">✓</span> Zoom on hover</li>
+                    <li><span class="check">✓</span> Click for full-size preview</li>
+                    <li><span class="check">✓</span> Delete with one click</li>
+                    <li><span class="check">✓</span> Filter by has/no photo</li>
+                    <li><span class="check">✓</span> Cache-busting on updates</li>
+                </ul>
+            </div>
+        </div>
+        <div class="highlight-box">
+            <h4>📷 Where Photos Appear</h4>
+            <p>Outlook • Microsoft Teams • SharePoint • Windows sign-in screen</p>
+            <p style="margin-top: 10px; color: #94a3b8;">Stored in AD thumbnailPhoto attribute (max 100KB per AD limit)</p>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 15: Session Tracking -->
+<div class="slide">
+    <h2>Active Session Tracking</h2>
+    <div class="slide-content">
+        <p style="color: #94a3b8; font-size: 1.1em;">Real-time monitoring of who's logged in (Admin only)</p>
+        <div class="slide-columns">
+            <div class="card card-red">
+                <h4>Session Info</h4>
+                <ul>
+                    <li><span class="bullet">📍</span> IP Address</li>
+                    <li><span class="bullet">💻</span> Device & browser detection</li>
+                    <li><span class="bullet">🕐</span> Login time</li>
+                    <li><span class="bullet">⚡</span> Last activity (5-min window)</li>
+                    <li><span class="bullet">🎭</span> Role & display name</li>
+                    <li><span class="bullet">🆔</span> Session ID</li>
+                </ul>
+            </div>
+            <div class="card card-blue">
+                <h4>Admin Controls</h4>
+                <ul>
+                    <li><span class="check">✓</span> Force logout any session</li>
+                    <li><span class="check">✓</span> Auto-refresh every 30 sec</li>
+                    <li><span class="check">✓</span> Session detail modal</li>
+                    <li><span class="check">✓</span> Self-logout confirmation</li>
+                    <li><span class="check">✓</span> Auto-expire after 8 hours</li>
+                    <li><span class="check">✓</span> Active vs Idle indicator</li>
+                </ul>
+            </div>
+        </div>
+        <div class="stat-grid">
+            <div class="stat-card"><div class="value" style="color: #3b82f6;">📊</div><div class="label">Total</div></div>
+            <div class="stat-card"><div class="value" style="color: #22c55e;">🟢</div><div class="label">Active</div></div>
+            <div class="stat-card"><div class="value" style="color: #eab308;">🟡</div><div class="label">Idle</div></div>
+            <div class="stat-card"><div class="value" style="color: #ef4444;">👑</div><div class="label">Admin</div></div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 16: Reports Dashboard -->
+<div class="slide">
+    <h2>Reports & Analytics Dashboard</h2>
+    <div class="slide-content">
+        <p style="color: #94a3b8; font-size: 1.1em;">ManageEngine-style dashboard with interactive charts</p>
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>📊 Chart Sections</h4>
+                <ul>
+                    <li><span class="bullet">•</span> User Reports (bar chart)</li>
+                    <li><span class="bullet">•</span> System Reports (computers)</li>
+                    <li><span class="bullet">•</span> Logged On Users</li>
+                    <li><span class="bullet">•</span> Groups & OU Reports</li>
+                    <li><span class="bullet">•</span> Users by Department (pie)</li>
+                    <li><span class="bullet">•</span> Computers by OS (pie)</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>📥 Quick CSV Exports</h4>
+                <ul>
+                    <li><span class="check">✓</span> All Users</li>
+                    <li><span class="check">✓</span> Active Users</li>
+                    <li><span class="check">✓</span> Disabled Users</li>
+                    <li><span class="check">✓</span> Locked Users</li>
+                    <li><span class="check">✓</span> Never Logged In</li>
+                    <li><span class="check">✓</span> Inactive Users</li>
+                    <li><span class="check">✓</span> All Groups & Computers</li>
+                </ul>
+            </div>
+        </div>
+        <div class="highlight-box">
+            <h4>⚡ Quick Stat Cards</h4>
+            <p>Locked Users • Passwords Never Expire • Must Change Password • Inactive Users</p>
+            <p style="margin-top: 10px;">Each card has an action link for quick access to filtered results</p>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 17: Audit Logging -->
+<div class="slide">
+    <h2>Complete Audit Logging</h2>
+    <div class="slide-content">
+        <div class="highlight-box">
+            <h4>🔒 Every Action Logged for Compliance</h4>
+            <p>Perfect for HIPAA, SOX, GDPR, ISO 27001 compliance requirements</p>
+        </div>
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>Tracked Events</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Login attempts (success/failed)</li>
+                    <li><span class="bullet">•</span> All create/modify/delete</li>
+                    <li><span class="bullet">•</span> Password resets</li>
+                    <li><span class="bullet">•</span> Enable/disable operations</li>
+                    <li><span class="bullet">•</span> Group membership changes</li>
+                    <li><span class="bullet">•</span> Settings updates</li>
+                    <li><span class="bullet">•</span> Workflow approvals</li>
+                    <li><span class="bullet">•</span> Session terminations</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>Log Fields</h4>
+                <ul>
+                    <li><span class="bullet">📅</span> Timestamp (UTC)</li>
+                    <li><span class="bullet">👤</span> Operator username</li>
+                    <li><span class="bullet">🎭</span> Role</li>
+                    <li><span class="bullet">⚡</span> Action performed</li>
+                    <li><span class="bullet">📁</span> Object type & name</li>
+                    <li><span class="bullet">📝</span> Details</li>
+                    <li><span class="bullet">✓/✗</span> Success/Failed status</li>
+                    <li><span class="bullet">🌐</span> IP Address</li>
+                </ul>
+            </div>
+        </div>
+        <p style="color: #86efac; text-align: center; font-size: 1.1em;">✓ All users can view (transparency) • CSV export with date-stamped filename</p>
+    </div>
+</div>
+
+<!-- Slide 18: Role-Based Access -->
+<div class="slide">
+    <h2>Role-Based Access Control</h2>
+    <div class="slide-content">
+        <div class="slide-columns-3">
+            <div class="card card-red">
+                <h4>🔴 ADMIN</h4>
+                <ul>
+                    <li><span class="check">✓</span> Full system access</li>
+                    <li><span class="check">✓</span> Delete any object</li>
+                    <li><span class="check">✓</span> Manage settings</li>
+                    <li><span class="check">✓</span> Approve workflows</li>
+                    <li><span class="check">✓</span> Manage app users</li>
+                    <li><span class="check">✓</span> View sessions</li>
+                    <li><span class="check">✓</span> Service accounts</li>
+                </ul>
+            </div>
+            <div class="card card-yellow">
+                <h4>🟡 HELPDESK</h4>
+                <ul>
+                    <li><span class="check">✓</span> Create/edit users, groups</li>
+                    <li><span class="check">✓</span> Reset passwords</li>
+                    <li><span class="check">✓</span> Enable/disable accounts</li>
+                    <li><span class="check">✓</span> Unlock accounts</li>
+                    <li><span class="check">✓</span> Manage group members</li>
+                    <li><span class="check">✓</span> Move users</li>
+                    <li style="color: #ef4444;"><span>✗</span> Cannot delete</li>
+                </ul>
+            </div>
+            <div class="card card-blue">
+                <h4>🔵 VIEWER</h4>
+                <ul>
+                    <li><span class="check">✓</span> Read-only access</li>
+                    <li><span class="check">✓</span> View all data</li>
+                    <li><span class="check">✓</span> View reports</li>
+                    <li><span class="check">✓</span> Submit workflows</li>
+                    <li><span class="check">✓</span> Export CSVs</li>
+                    <li style="color: #ef4444;"><span>✗</span> Cannot modify</li>
+                    <li style="color: #ef4444;"><span>✗</span> Cannot delete</li>
+                </ul>
+            </div>
+        </div>
+        <div class="highlight-box">
+            <h4>Perfect for Delegation</h4>
+            <p>Give managers Viewer access • Give helpdesk Helpdesk role • Reserve Admin for senior IT</p>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 19: Security -->
+<div class="slide">
+    <h2>Enterprise Security</h2>
+    <div class="slide-content">
+        <div class="slide-columns">
+            <div class="card card-red">
+                <h4>🔐 Authentication</h4>
+                <ul>
+                    <li><span class="check">✓</span> Dual auth requirement</li>
+                    <li><span class="check">✓</span> Must exist in app_users</li>
+                    <li><span class="check">✓</span> Must pass AD LDAP bind</li>
+                    <li><span class="check">✓</span> JWT tokens (8-hour expiry)</li>
+                    <li><span class="check">✓</span> HS256 signing</li>
+                    <li><span class="check">✓</span> SHA-256 session hashing</li>
+                </ul>
+            </div>
+            <div class="card card-blue">
+                <h4>🔒 Data Protection</h4>
+                <ul>
+                    <li><span class="check">✓</span> Fernet AES encryption</li>
+                    <li><span class="check">✓</span> Passwords never exposed</li>
+                    <li><span class="check">✓</span> Case-insensitive login</li>
+                    <li><span class="check">✓</span> Auto-expire idle sessions</li>
+                    <li><span class="check">✓</span> IP address tracking</li>
+                    <li><span class="check">✓</span> Force-logout capability</li>
+                </ul>
+            </div>
+        </div>
+        <div class="slide-columns">
+            <div class="card card-purple">
+                <h4>🛡️ Built-in Protection</h4>
+                <ul>
+                    <li><span class="check">✓</span> Protected accounts (krbtgt, Administrator)</li>
+                    <li><span class="check">✓</span> Protected groups (Domain Admins)</li>
+                    <li><span class="check">✓</span> System critical service accounts</li>
+                    <li><span class="check">✓</span> Cannot delete own account</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>📊 Compliance Ready</h4>
+                <ul>
+                    <li><span class="check">✓</span> Complete audit trail</li>
+                    <li><span class="check">✓</span> Every action with IP</li>
+                    <li><span class="check">✓</span> CSV export for auditors</li>
+                    <li><span class="check">✓</span> Optional LDAPS encryption</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 20: Settings -->
+<div class="slide">
+    <h2>Dynamic Settings</h2>
+    <div class="slide-content">
+        <div class="highlight-box">
+            <h4>🔄 No Restart Required</h4>
+            <p>Change settings through the web UI - all changes take effect immediately without service restart</p>
+        </div>
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>1️⃣ Active Directory</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Primary & Secondary DC</li>
+                    <li><span class="bullet">•</span> Domain name & Base DN</li>
+                    <li><span class="bullet">•</span> Service account credentials</li>
+                    <li><span class="bullet">•</span> LDAPS toggle + port</li>
+                    <li><span class="bullet">•</span> Test Connection button</li>
+                </ul>
+            </div>
+            <div class="card card-cyan">
+                <h4>2️⃣ Visibility</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Show/hide built-in users</li>
+                    <li><span class="bullet">•</span> Show/hide built-in groups</li>
+                    <li><span class="bullet">•</span> Show/hide built-in containers</li>
+                    <li><span class="bullet">•</span> Example objects displayed</li>
+                </ul>
+            </div>
+            <div class="card card-yellow">
+                <h4>3️⃣ Password Policy</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Minimum length</li>
+                    <li><span class="bullet">•</span> Complexity requirements</li>
+                    <li><span class="bullet">•</span> Password history</li>
+                    <li><span class="bullet">•</span> Max age in days</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>4️⃣ Email / SMTP</h4>
+                <ul>
+                    <li><span class="bullet">•</span> SMTP server + port</li>
+                    <li><span class="bullet">•</span> Credentials</li>
+                    <li><span class="bullet">•</span> Notification toggles</li>
+                    <li><span class="bullet">•</span> Send test email</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 21: Installation -->
+<div class="slide">
+    <h2>Automated Installation</h2>
+    <div class="slide-content">
+        <div class="highlight-box">
+            <h4>⚡ One-Command Installation</h4>
+            <div class="code-block">powershell -ExecutionPolicy Bypass -File install.ps1</div>
+        </div>
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>What It Does Automatically</h4>
+                <ul>
+                    <li><span class="check">✓</span> Installs Python 3.12 if missing</li>
+                    <li><span class="check">✓</span> Installs Node.js 20 LTS if missing</li>
+                    <li><span class="check">✓</span> Creates directory structure</li>
+                    <li><span class="check">✓</span> Installs all packages</li>
+                    <li><span class="check">✓</span> Builds production frontend</li>
+                    <li><span class="check">✓</span> Generates secret key</li>
+                    <li><span class="check">✓</span> Creates admin user</li>
+                    <li><span class="check">✓</span> Windows Scheduled Task</li>
+                    <li><span class="check">✓</span> Configures firewall</li>
+                    <li><span class="check">✓</span> Starts the service</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>Setup Wizard Asks</h4>
+                <ul>
+                    <li><span class="bullet">📁</span> Install directory</li>
+                    <li><span class="bullet">🌐</span> DC IP/Hostname</li>
+                    <li><span class="bullet">🏢</span> Domain name</li>
+                    <li><span class="bullet">👤</span> Service account UPN</li>
+                    <li><span class="bullet">🔒</span> Service password</li>
+                    <li><span class="bullet">🔐</span> LDAPS setting</li>
+                    <li><span class="bullet">👑</span> First admin username</li>
+                </ul>
+                <p style="margin-top: 15px; color: #86efac;">Total setup time: 15-20 minutes</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 22: Access -->
+<div class="slide">
+    <h2>Access & URLs</h2>
+    <div class="slide-content">
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>🌐 Access URLs</h4>
+                <p style="margin-bottom: 10px;">Main Application:</p>
+                <div class="code-block">http://servername:8080</div>
+                <p style="margin-bottom: 10px; margin-top: 15px;">API Documentation:</p>
+                <div class="code-block">http://servername:8080/docs</div>
+                <p style="margin-bottom: 10px; margin-top: 15px;">Health Check:</p>
+                <div class="code-block">http://servername:8080/api/health</div>
+            </div>
+            <div class="card card-green">
+                <h4>💻 Supported Browsers</h4>
+                <ul>
+                    <li><span class="check">✓</span> Chrome</li>
+                    <li><span class="check">✓</span> Firefox</li>
+                    <li><span class="check">✓</span> Edge</li>
+                    <li><span class="check">✓</span> Safari</li>
+                    <li><span class="check">✓</span> Any modern browser</li>
+                </ul>
+                <h4 style="margin-top: 20px;">📱 Access From</h4>
+                <ul>
+                    <li><span class="check">✓</span> Windows workstations</li>
+                    <li><span class="check">✓</span> macOS computers</li>
+                    <li><span class="check">✓</span> Linux desktops</li>
+                    <li><span class="check">✓</span> Tablets & mobile (responsive)</li>
+                </ul>
+            </div>
+        </div>
+        <div class="highlight-box">
+            <h4>✅ Deployment Benefits</h4>
+            <p>Single service on port 8080 • No SSL certificates needed • Works from any browser • Domain-joined or non-domain PCs • No client installation required</p>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 23: Competitive Advantages -->
+<div class="slide">
+    <h2>Competitive Advantages</h2>
+    <div class="slide-content">
+        <div class="slide-columns-3">
+            <div class="card card-blue">
+                <h4>vs ADUC</h4>
+                <ul>
+                    <li><span class="check">✓</span> Web-based</li>
+                    <li><span class="check">✓</span> No client install</li>
+                    <li><span class="check">✓</span> Any device</li>
+                    <li><span class="check">✓</span> Full audit trail</li>
+                    <li><span class="check">✓</span> Bulk operations</li>
+                    <li><span class="check">✓</span> Modern UI</li>
+                    <li><span class="check">✓</span> Role-based</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>vs ManageEngine</h4>
+                <ul>
+                    <li><span class="check">✓</span> FREE & open source</li>
+                    <li><span class="check">✓</span> Self-hosted</li>
+                    <li><span class="check">✓</span> Full source available</li>
+                    <li><span class="check">✓</span> No user licensing</li>
+                    <li><span class="check">✓</span> Customizable</li>
+                    <li><span class="check">✓</span> No vendor lock-in</li>
+                    <li><span class="check">✓</span> MIT License</li>
+                </ul>
+            </div>
+            <div class="card card-purple">
+                <h4>vs PowerShell</h4>
+                <ul>
+                    <li><span class="check">✓</span> No scripting needed</li>
+                    <li><span class="check">✓</span> Consistent UI</li>
+                    <li><span class="check">✓</span> Better auditing</li>
+                    <li><span class="check">✓</span> Bulk previews</li>
+                    <li><span class="check">✓</span> Delegation ready</li>
+                    <li><span class="check">✓</span> Approval workflows</li>
+                    <li><span class="check">✓</span> Real-time reports</li>
+                </ul>
+            </div>
+        </div>
+        <div class="highlight-box">
+            <h4>🌟 Unique Features Not Found Elsewhere</h4>
+            <p>Service Account Registry (AD + DB) • Approval Workflows built-in • Auto-lockout detection • Photo auto-processing • Session monitoring with force-logout</p>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 24: Use Cases -->
+<div class="slide">
+    <h2>Use Cases</h2>
+    <div class="slide-content">
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>🏢 IT Departments</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Streamline daily AD admin</li>
+                    <li><span class="bullet">•</span> Delegate safely to juniors</li>
+                    <li><span class="bullet">•</span> Track changes for compliance</li>
+                    <li><span class="bullet">•</span> Automate onboarding</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>🎧 Help Desk Teams</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Fast password resets</li>
+                    <li><span class="bullet">•</span> Unlock without full admin</li>
+                    <li><span class="bullet">•</span> Template-based creation</li>
+                    <li><span class="bullet">•</span> Bulk operations</li>
+                </ul>
+            </div>
+            <div class="card card-purple">
+                <h4>💼 Managed Service Providers</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Multi-tier delegation</li>
+                    <li><span class="bullet">•</span> Per-client audit trails</li>
+                    <li><span class="bullet">•</span> Fast tech onboarding</li>
+                    <li><span class="bullet">•</span> Reduced training time</li>
+                </ul>
+            </div>
+            <div class="card card-orange">
+                <h4>📊 Compliance Officers</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Read-only viewer role</li>
+                    <li><span class="bullet">•</span> Full audit log access</li>
+                    <li><span class="bullet">•</span> CSV exports</li>
+                    <li><span class="bullet">•</span> Session monitoring</li>
+                </ul>
+            </div>
+            <div class="card card-red">
+                <h4>🎓 Educational Institutions</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Semester bulk creation</li>
+                    <li><span class="bullet">•</span> Department delegation</li>
+                    <li><span class="bullet">•</span> Photo directory</li>
+                    <li><span class="bullet">•</span> Class group management</li>
+                </ul>
+            </div>
+            <div class="card card-cyan">
+                <h4>🏭 Enterprise Organizations</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Approval workflows</li>
+                    <li><span class="bullet">•</span> Service account governance</li>
+                    <li><span class="bullet">•</span> Multi-role delegation</li>
+                    <li><span class="bullet">•</span> Compliance trail</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 25: Version & Roadmap -->
+<div class="slide">
+    <h2>Version 2.2.2 - Current Release</h2>
+    <div class="slide-content">
+        <div class="slide-columns">
+            <div class="card card-green">
+                <h4>✅ Implemented Features</h4>
+                <div class="feature-list">
+                    <ul>
+                        <li><span class="check">✓</span> User CRUD</li>
+                        <li><span class="check">✓</span> Group CRUD</li>
+                        <li><span class="check">✓</span> Computer CRUD</li>
+                        <li><span class="check">✓</span> OU management</li>
+                        <li><span class="check">✓</span> Service accounts</li>
+                        <li><span class="check">✓</span> User templates</li>
+                        <li><span class="check">✓</span> Workflows</li>
+                        <li><span class="check">✓</span> Bulk import CSV</li>
+                        <li><span class="check">✓</span> Bulk update CSV</li>
+                        <li><span class="check">✓</span> GPO viewing</li>
+                        <li><span class="check">✓</span> Photo management</li>
+                        <li><span class="check">✓</span> Session tracking</li>
+                        <li><span class="check">✓</span> Reports & analytics</li>
+                        <li><span class="check">✓</span> Audit logging</li>
+                        <li><span class="check">✓</span> RBAC 3-tier</li>
+                        <li><span class="check">✓</span> Auto installer</li>
+                        <li><span class="check">✓</span> Dark theme UI</li>
+                        <li><span class="check">✓</span> Sortable columns</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="card card-purple">
+                <h4>✨ Recent Enhancements</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Bulk Update from CSV</li>
+                    <li><span class="bullet">•</span> Sortable Users table</li>
+                    <li><span class="bullet">•</span> Password generator</li>
+                    <li><span class="bullet">•</span> Show/hide passwords</li>
+                    <li><span class="bullet">•</span> Unlock during password reset</li>
+                    <li><span class="bullet">•</span> Case-insensitive login</li>
+                    <li><span class="bullet">•</span> Enhanced error handling</li>
+                </ul>
+                <h4 style="margin-top: 20px;">🚀 Future Potential</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Two-factor authentication</li>
+                    <li><span class="bullet">•</span> Password self-service portal</li>
+                    <li><span class="bullet">•</span> Advanced report builder</li>
+                    <li><span class="bullet">•</span> Multi-domain support</li>
+                    <li><span class="bullet">•</span> Email notifications</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 26: Getting Started -->
+<div class="slide">
+    <h2>Getting Started</h2>
+    <div class="slide-content">
+        <div class="highlight-box">
+            <h4>📥 Step 1: Download</h4>
+            <div class="code-block">git clone https://github.com/your-repo/ad-manager-pro.git</div>
+        </div>
+        <div class="highlight-box">
+            <h4>⚙️ Step 2: Run Installer as Admin</h4>
+            <div class="code-block">powershell -ExecutionPolicy Bypass -File install.ps1</div>
+        </div>
+        <div class="highlight-box">
+            <h4>🔒 Step 3: Setup AD Permissions (on Domain Controller)</h4>
+            <div class="code-block">powershell -ExecutionPolicy Bypass -File setup_permissions.ps1</div>
+        </div>
+        <div class="highlight-box">
+            <h4>🌐 Step 4: Access</h4>
+            <div class="code-block">http://your-server:8080</div>
+            <p style="margin-top: 10px;">Login with your Active Directory credentials</p>
+        </div>
+        <p style="text-align: center; font-size: 1.3em; color: #86efac; margin-top: 20px;">
+            ⏱️ Total setup time: <strong>15-20 minutes</strong>
+        </p>
+    </div>
+</div>
+
+<!-- Slide 27: Resources -->
+<div class="slide">
+    <h2>Resources & Documentation</h2>
+    <div class="slide-content">
+        <div class="slide-columns">
+            <div class="card card-blue">
+                <h4>📦 GitHub Repository</h4>
+                <ul>
+                    <li><span class="check">✓</span> Complete source code</li>
+                    <li><span class="check">✓</span> README.md quick start</li>
+                    <li><span class="check">✓</span> Full documentation (85+ pages)</li>
+                    <li><span class="check">✓</span> Issue tracker</li>
+                    <li><span class="check">✓</span> Feature requests</li>
+                    <li><span class="check">✓</span> Pull requests welcome</li>
+                </ul>
+            </div>
+            <div class="card card-green">
+                <h4>📚 Documentation Includes</h4>
+                <ul>
+                    <li><span class="check">✓</span> Complete API reference (80+ endpoints)</li>
+                    <li><span class="check">✓</span> Database schema (7 tables)</li>
+                    <li><span class="check">✓</span> AD permissions guide</li>
+                    <li><span class="check">✓</span> Installation instructions</li>
+                    <li><span class="check">✓</span> Troubleshooting guide</li>
+                    <li><span class="check">✓</span> Maintenance schedule</li>
+                </ul>
+            </div>
+        </div>
+        <div class="slide-columns">
+            <div class="card card-purple">
+                <h4>🔧 Included Scripts</h4>
+                <ul>
+                    <li><span class="bullet">•</span> <code>install.ps1</code> - Automated installer</li>
+                    <li><span class="bullet">•</span> <code>uninstall.ps1</code> - Clean uninstaller</li>
+                    <li><span class="bullet">•</span> <code>setup_permissions.ps1</code> - DC permissions</li>
+                    <li><span class="bullet">•</span> <code>start.bat</code> - Development mode</li>
+                    <li><span class="bullet">•</span> <code>start_production.bat</code> - Production</li>
+                </ul>
+            </div>
+            <div class="card card-orange">
+                <h4>❤️ Built-in Help</h4>
+                <ul>
+                    <li><span class="bullet">•</span> Swagger API at <code>/docs</code></li>
+                    <li><span class="bullet">•</span> ReDoc API at <code>/redoc</code></li>
+                    <li><span class="bullet">•</span> Health check at <code>/api/health</code></li>
+                </ul>
+                <p style="color: #86efac; margin-top: 20px; font-size: 1.2em; font-weight: 600;">📜 MIT License - Free for commercial use</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 28: Thank You -->
+<div class="slide thank-you">
+    <h1>Thank You!</h1>
+    <div class="subtitle" style="color: #94a3b8; font-size: 1.8em; margin-bottom: 30px;">AD Manager Pro v2.2.2</div>
+    <div class="description" style="color: #cbd5e1; font-size: 1.3em; max-width: 700px;">
+        Enterprise Active Directory Management Platform
+    </div>
+    <div class="grid">
+        <div class="grid-item">🌐<br>Modern Web Interface</div>
+        <div class="grid-item">🔒<br>Enterprise Security</div>
+        <div class="grid-item">📊<br>Complete Auditing</div>
+        <div class="grid-item">⚡<br>Bulk Operations</div>
+        <div class="grid-item">🎯<br>Role-Based Access</div>
+        <div class="grid-item">🆓<br>Free & Open Source</div>
+    </div>
+    <div style="margin-top: 40px; font-size: 1.5em; color: #60a5fa;">Questions?</div>
+    <div class="code-block" style="margin-top: 30px; font-size: 1.1em;">github.com/your-repo/ad-manager-pro</div>
+</div>
+
+</div>
+
+<div class="slide-counter">
+    <span id="currentSlide">1</span> / <span id="totalSlides">28</span>
+</div>
+
+<div class="nav">
+    <button id="prevBtn" onclick="prevSlide()">←</button>
+    <button id="nextBtn" onclick="nextSlide()">→</button>
+</div>
+
+<script>
+    let currentSlide = 0;
+    const slides = document.querySelectorAll('.slide');
+    const totalSlides = slides.length;
+
+    document.getElementById('totalSlides').textContent = totalSlides;
+
+    function showSlide(n) {
+        slides.forEach(s => s.classList.remove('active'));
+        currentSlide = (n + totalSlides) % totalSlides;
+        slides[currentSlide].classList.add('active');
+        document.getElementById('currentSlide').textContent = currentSlide + 1;
+
+        const progress = ((currentSlide + 1) / totalSlides) * 100;
+        document.getElementById('progressBar').style.width = progress + '%';
+
+        document.getElementById('prevBtn').disabled = currentSlide === 0;
+        document.getElementById('nextBtn').disabled = currentSlide === totalSlides - 1;
+
+        // Scroll to top of slide
+        slides[currentSlide].scrollTop = 0;
+    }
+
+    function nextSlide() { showSlide(currentSlide + 1); }
+    function prevSlide() { showSlide(currentSlide - 1); }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
+            e.preventDefault();
+            nextSlide();
+        } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+            e.preventDefault();
+            prevSlide();
+        } else if (e.key === 'Home') {
+            e.preventDefault();
+            showSlide(0);
+        } else if (e.key === 'End') {
+            e.preventDefault();
+            showSlide(totalSlides - 1);
+        } else if (e.key === 'f' || e.key === 'F') {
+            e.preventDefault();
+            if (document.fullscreenElement) {
+                document.exitFullscreen();
+            } else {
+                document.documentElement.requestFullscreen();
+            }
+        }
+    });
+
+    showSlide(0);
+</script>
+
+</body>
+</html>
