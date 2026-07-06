@@ -85,7 +85,7 @@ export default function Layout() {
               </div>
               <div>
                 <div className="font-bold text-sm">AD Manager Pro</div>
-                <div className="text-xs text-slate-400">v2.2</div>
+                <div className="text-xs text-slate-400">v2.3</div>
               </div>
             </div>
           )}
