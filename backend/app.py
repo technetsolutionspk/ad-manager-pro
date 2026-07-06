@@ -1,1556 +1,64 @@
 """
-AD Manager Pro — FastAPI Backend v2.2.2
-========================================
-FIXES IN v2.2.2:
-  - Fresh password read from DB on every connection
-  - Password change verification
-  - GPO error handling (no more silent failures)
-  - Empty attribute handling for LDAP
-  - Two-step user creation
-  - Accurate lockout detection
-  - Fixed delete_user missing method
-  - Fixed self.config.AD_DOMAIN -> config.AD_DOMAIN
-  - Fixed log_audit -> log_action
+AD Manager Pro - FastAPI Application
+=====================================
+Contains: All API routes and FastAPI setup
 """
 
 import os
 import csv
 import io
 import json
-import re
-import base64
 import logging
-import smtplib
-import hashlib
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional
 from contextlib import asynccontextmanager
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
-from fastapi import FastAPI, HTTPException, Depends, status, Request, Query, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.responses import StreamingResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from ldap3 import MODIFY_REPLACE, Connection, SIMPLE
 import uvicorn
 
-os.makedirs("logs", exist_ok=True)
-os.makedirs("database", exist_ok=True)
-os.makedirs("certs", exist_ok=True)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    handlers=[logging.FileHandler("logs/app.log"), logging.StreamHandler()]
+from models import (
+    config, SessionLocal, get_db, Session,
+    AuditLog, AppUser, AppSetting, UserTemplate, WorkflowRequest,
+    ActiveSession, ServiceAccount, Token,
+    oauth2_scheme, create_access_token, hash_token,
+    get_current_user, require_admin, log_action,
+    get_client_ip, get_user_agent, send_email,
+    init_default_settings, get_setting, reload_config_from_db,
+    encrypt_value, decrypt_value, ENCRYPTED_KEYS, PASSWORD_MASK,
+    get_setting_category, safe_int, safe_str, safe_datetime_str, clean_value,
 )
+from ad_service import ad_service, LDAP_AVAILABLE
+
 logger = logging.getLogger(__name__)
 
-try:
-    from ldap3 import (
-        Server, Connection, ALL, SIMPLE, SUBTREE, LEVEL, BASE,
-        MODIFY_REPLACE, MODIFY_ADD, MODIFY_DELETE,
-        ServerPool, ROUND_ROBIN
-    )
-    from ldap3.core.exceptions import LDAPException, LDAPBindError
-    LDAP_AVAILABLE = True
-    logger.info("ldap3 loaded")
-except ImportError:
-    LDAP_AVAILABLE = False
-
-try:
-    from cryptography.fernet import Fernet
-    CRYPTO_AVAILABLE = True
-except ImportError:
-    CRYPTO_AVAILABLE = False
-
-from sqlalchemy import create_engine, Column, String, DateTime, Integer, Boolean, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from dotenv import load_dotenv
-from pydantic import BaseModel
-
-load_dotenv()
-
-# ─── Built-in AD Objects ────────────────────────────────────
-BUILTIN_USERS = [
-    "Administrator", "Guest", "krbtgt", "DefaultAccount",
-    "WDAGUtilityAccount", "HelpAssistant", "SUPPORT_388945a0"
-]
-
-BUILTIN_GROUPS = [
-    "Account Operators", "Administrators", "Backup Operators", "Cert Publishers",
-    "Cloneable Domain Controllers", "DnsAdmins", "DnsUpdateProxy", "Domain Admins",
-    "Domain Computers", "Domain Controllers", "Domain Guests", "Domain Users",
-    "Enterprise Admins", "Enterprise Read-only Domain Controllers", "Event Log Readers",
-    "Group Policy Creator Owners", "Guests", "Hyper-V Administrators", "IIS_IUSRS",
-    "Incoming Forest Trust Builders", "Network Configuration Operators",
-    "Performance Log Users", "Performance Monitor Users",
-    "Pre-Windows 2000 Compatible Access", "Print Operators", "Protected Users",
-    "RAS and IAS Servers", "RDS Endpoint Servers", "RDS Management Servers",
-    "RDS Remote Access Servers", "Read-only Domain Controllers", "Remote Desktop Users",
-    "Remote Management Users", "Replicator", "Schema Admins", "Server Operators",
-    "Storage Replica Administrators", "System Managed Accounts Group",
-    "Terminal Server License Servers", "Users", "Windows Authorization Access Group",
-]
-
-BUILTIN_CONTAINERS = [
-    "CN=Users", "CN=Builtin", "CN=Computers",
-    "CN=ForeignSecurityPrincipals", "CN=Managed Service Accounts", "CN=System"
-]
-
-def is_builtin_user(u): return u in BUILTIN_USERS
-def is_builtin_group(n): return n in BUILTIN_GROUPS
-def is_in_builtin_container(dn):
-    if not dn: return False
-    d = dn.upper()
-    return any(c.upper() in d for c in BUILTIN_CONTAINERS)
-
-# ─── Safe Helpers ────────────────────────────────────────────
-def safe_int(v, d=0):
-    if v is None: return d
-    if isinstance(v, bool): return int(v)
-    if isinstance(v, int): return v
-    if hasattr(v, 'year'): return d
-    try: return int(v)
-    except: return d
-
-def safe_str(v, d=""):
-    if v is None: return d
-    if isinstance(v, (list, tuple)): return ", ".join(str(x) for x in v)
-    return str(v)
-
-def safe_datetime_str(v, d=""):
-    if v is None or v == "": return d
-    if hasattr(v, 'isoformat'):
-        try: return v.isoformat()
-        except: return d
-    return str(v)
-
-def clean_value(v):
-    if v is None: return None
-    c = str(v).strip()
-    return c if c else None
-
-# ─── Config ──────────────────────────────────────────────────
-class Config:
-    AD_SERVER_PRIMARY   = os.getenv("AD_SERVER_PRIMARY", "192.168.100.10")
-    AD_SERVER_SECONDARY = os.getenv("AD_SERVER_SECONDARY", "")
-    AD_DOMAIN           = os.getenv("AD_DOMAIN", "abasyn.local")
-    AD_BASE_DN          = os.getenv("AD_BASE_DN", "DC=abasyn,DC=local")
-    AD_TARGET_OU        = os.getenv("AD_TARGET_OU", "DC=abasyn,DC=local")
-    AD_SERVICE_ACCOUNT  = os.getenv("AD_SERVICE_ACCOUNT", "svc-admanager@abasyn.local")
-    AD_SERVICE_PASSWORD = os.getenv("AD_SERVICE_PASSWORD", "CHANGE_ME")
-    AD_USE_LDAPS        = os.getenv("AD_USE_LDAPS", "true").lower() == "true"
-    AD_PORT             = int(os.getenv("AD_PORT", "636"))
-    SECRET_KEY          = os.getenv("SECRET_KEY", "change-me-in-production")
-    ALGORITHM           = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES = 480
-    DATABASE_URL = "sqlite:///./database/audit.db"
-    APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
-    APP_PORT = int(os.getenv("APP_PORT", "8443"))
-
-config = Config()
-
-# ─── Database Models ─────────────────────────────────────────
-Base = declarative_base()
-
-class AuditLog(Base):
-    __tablename__ = "audit_logs"
-    id            = Column(Integer, primary_key=True, index=True)
-    timestamp     = Column(DateTime, default=datetime.utcnow)
-    operator      = Column(String(100))
-    operator_role = Column(String(20))
-    action        = Column(String(100))
-    object_type   = Column(String(50))
-    object_name   = Column(String(200))
-    details       = Column(Text)
-    status        = Column(String(20))
-    ip_address    = Column(String(50))
-
-class AppUser(Base):
-    __tablename__ = "app_users"
-    id           = Column(Integer, primary_key=True, index=True)
-    username     = Column(String(100), unique=True, index=True)
-    display_name = Column(String(200))
-    email        = Column(String(200))
-    role         = Column(String(20), default="Viewer")
-    active       = Column(Boolean, default=True)
-    last_login   = Column(DateTime)
-
-class AppSetting(Base):
-    __tablename__ = "app_settings"
-    id         = Column(Integer, primary_key=True, index=True)
-    key        = Column(String(100), unique=True, index=True)
-    value      = Column(Text)
-    category   = Column(String(50))
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    updated_by = Column(String(100))
-
-class UserTemplate(Base):
-    __tablename__ = "user_templates"
-    id                   = Column(Integer, primary_key=True, index=True)
-    name                 = Column(String(100), unique=True, index=True)
-    description          = Column(Text)
-    ou                   = Column(String(500))
-    department           = Column(String(200))
-    title                = Column(String(200))
-    company              = Column(String(200))
-    office               = Column(String(200))
-    phone                = Column(String(50))
-    manager              = Column(String(500))
-    groups               = Column(Text)
-    password_never_expires = Column(Boolean, default=False)
-    must_change_password = Column(Boolean, default=True)
-    enabled              = Column(Boolean, default=True)
-    created_at           = Column(DateTime, default=datetime.utcnow)
-    created_by           = Column(String(100))
-
-class WorkflowRequest(Base):
-    __tablename__    = "workflow_requests"
-    id               = Column(Integer, primary_key=True, index=True)
-    request_type     = Column(String(50))
-    requested_by     = Column(String(100))
-    target_object    = Column(String(200))
-    payload          = Column(Text)
-    status           = Column(String(20), default="pending")
-    reason           = Column(Text)
-    rejection_reason = Column(Text)
-    approved_by      = Column(String(100))
-    approved_at      = Column(DateTime)
-    completed_at     = Column(DateTime)
-    created_at       = Column(DateTime, default=datetime.utcnow)
-
-class ActiveSession(Base):
-    __tablename__  = "active_sessions"
-    id             = Column(Integer, primary_key=True, index=True)
-    username       = Column(String(100), index=True)
-    display_name   = Column(String(200))
-    role           = Column(String(20))
-    ip_address     = Column(String(50))
-    user_agent     = Column(String(500))
-    login_time     = Column(DateTime, default=datetime.utcnow)
-    last_activity  = Column(DateTime, default=datetime.utcnow)
-    token_hash     = Column(String(100), index=True)
-
-class ServiceAccount(Base):
-    __tablename__          = "service_accounts"
-    id                     = Column(Integer, primary_key=True, index=True)
-    username               = Column(String(100), unique=True, index=True)
-    display_name           = Column(String(200))
-    email                  = Column(String(200))
-    description            = Column(Text)
-    purpose                = Column(Text)
-    owner                  = Column(String(100))
-    department             = Column(String(100))
-    ad_dn                  = Column(String(500))
-    ou                     = Column(String(500))
-    password_never_expires = Column(Boolean, default=True)
-    cannot_change_password = Column(Boolean, default=True)
-    is_system_critical     = Column(Boolean, default=False)
-    has_app_access         = Column(Boolean, default=False)
-    app_role               = Column(String(20), default="Viewer")
-    created_at             = Column(DateTime, default=datetime.utcnow)
-    created_by             = Column(String(100))
-    last_password_change   = Column(DateTime)
-    notes                  = Column(Text)
-
-engine      = create_engine(config.DATABASE_URL, connect_args={"check_same_thread": False})
-Base.metadata.create_all(bind=engine)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-def get_db():
-    db = SessionLocal()
-    try: yield db
-    finally: db.close()
-
-# ─── Encryption ──────────────────────────────────────────────
-def get_encryption_key():
-    return base64.urlsafe_b64encode(
-        config.SECRET_KEY.encode('utf-8')[:32].ljust(32, b'0')
-    )
-
-def encrypt_value(v):
-    if not v or not CRYPTO_AVAILABLE: return v or ""
-    try: return Fernet(get_encryption_key()).encrypt(v.encode()).decode()
-    except: return v
-
-def decrypt_value(v):
-    if not v or not CRYPTO_AVAILABLE: return v or ""
-    try: return Fernet(get_encryption_key()).decrypt(v.encode()).decode()
-    except: return v
-
-# ─── Settings ────────────────────────────────────────────────
-DEFAULT_SETTINGS = {
-    "ad_server_primary":       "192.168.100.10",
-    "ad_server_secondary":     "",
-    "ad_domain":               "abasyn.local",
-    "ad_base_dn":              "DC=abasyn,DC=local",
-    "ad_service_account":      "svc-admanager@abasyn.local",
-    "ad_service_password":     "",
-    "ad_use_ldaps":            "true",
-    "ad_port":                 "636",
-    "ad_default_user_ou":      "DC=abasyn,DC=local",
-    "show_builtin_users":      "false",
-    "show_builtin_groups":     "false",
-    "show_builtin_containers": "false",
-    "pwd_min_length":          "8",
-    "pwd_require_upper":       "true",
-    "pwd_require_lower":       "true",
-    "pwd_require_number":      "true",
-    "pwd_require_special":     "true",
-    "pwd_history_count":       "5",
-    "pwd_max_age_days":        "90",
-    "notify_smtp_server":      "",
-    "notify_smtp_port":        "587",
-    "notify_smtp_user":        "",
-    "notify_smtp_password":    "",
-    "notify_from_email":       "",
-    "notify_admin_email":      "",
-    "notify_on_lockout":       "true",
-    "notify_on_password_expiry": "true",
-}
-ENCRYPTED_KEYS = ["ad_service_password", "notify_smtp_password"]
-PASSWORD_MASK  = "********"
-
-def get_setting_category(k):
-    if k.startswith("ad_") or k.startswith("show_"): return "ad"
-    if k.startswith("pwd_"):    return "password"
-    if k.startswith("notify_"): return "notification"
-    return "general"
-
-def init_default_settings(db):
-    if db.query(AppSetting).count() == 0:
-        for k, v in DEFAULT_SETTINGS.items():
-            db.add(AppSetting(
-                key=k, value=v,
-                category=get_setting_category(k),
-                updated_by="system"
-            ))
-        db.commit()
-
-def get_setting(db, key, default=""):
-    s = db.query(AppSetting).filter(AppSetting.key == key).first()
-    return s.value if s else default
-
-def get_fresh_password():
-    """Read service account password fresh from database on every call"""
-    try:
-        db = SessionLocal()
-        s  = db.query(AppSetting).filter(AppSetting.key == "ad_service_password").first()
-        db.close()
-        if s and s.value:
-            pwd = decrypt_value(s.value)
-            if pwd and pwd != PASSWORD_MASK:
-                return pwd
-    except: pass
-    return config.AD_SERVICE_PASSWORD
-
-def reload_config_from_db(db):
-    try:
-        settings = {}
-        for s in db.query(AppSetting).all():
-            if s.key in ENCRYPTED_KEYS and s.value:
-                settings[s.key] = decrypt_value(s.value)
-            else:
-                settings[s.key] = s.value
-        if "ad_server_primary"   in settings: config.AD_SERVER_PRIMARY   = settings["ad_server_primary"]
-        if "ad_server_secondary" in settings: config.AD_SERVER_SECONDARY = settings["ad_server_secondary"]
-        if "ad_domain"           in settings: config.AD_DOMAIN           = settings["ad_domain"]
-        if "ad_base_dn"          in settings: config.AD_BASE_DN          = settings["ad_base_dn"]
-        if "ad_service_account"  in settings: config.AD_SERVICE_ACCOUNT  = settings["ad_service_account"]
-        if "ad_service_password" in settings and settings["ad_service_password"]:
-            config.AD_SERVICE_PASSWORD = settings["ad_service_password"]
-        if "ad_use_ldaps" in settings:
-            config.AD_USE_LDAPS = str(settings["ad_use_ldaps"]).lower() == "true"
-        if "ad_port" in settings:
-            try: config.AD_PORT = int(settings["ad_port"])
-            except: pass
-        if "ad_default_user_ou" in settings:
-            config.AD_TARGET_OU = settings["ad_default_user_ou"]
-        ad_service.base_dn   = config.AD_BASE_DN
-        ad_service.target_ou = config.AD_TARGET_OU
-        ad_service.domain    = config.AD_DOMAIN
-        logger.info(f"Config reloaded - Server: {config.AD_SERVER_PRIMARY}")
-    except Exception as e:
-        logger.error(f"Config reload failed: {e}")
-        # ─── AD Service ──────────────────────────────────────────────
-class ADService:
-    def __init__(self):
-        self.base_dn   = config.AD_BASE_DN
-        self.target_ou = config.AD_TARGET_OU
-        self.domain    = config.AD_DOMAIN
-        self._lockout_cache     = None
-        self._lockout_cached_at = None
-
-    def _get_server(self, address):
-        return Server(address, port=config.AD_PORT, use_ssl=config.AD_USE_LDAPS, get_info=ALL)
-
-    def _get_connection(self):
-        """Get LDAP connection - always reads FRESH password from DB"""
-        if not LDAP_AVAILABLE:
-            raise HTTPException(status_code=503, detail="LDAP3 not installed")
-        fresh_pwd = get_fresh_password()
-        if fresh_pwd:
-            config.AD_SERVICE_PASSWORD = fresh_pwd
-        servers = [self._get_server(config.AD_SERVER_PRIMARY)]
-        if config.AD_SERVER_SECONDARY:
-            servers.append(self._get_server(config.AD_SERVER_SECONDARY))
-        server = (
-            ServerPool(servers, ROUND_ROBIN, active=True, exhaust=True)
-            if len(servers) > 1 else servers[0]
-        )
-        try:
-            return Connection(
-                server,
-                user=config.AD_SERVICE_ACCOUNT,
-                password=config.AD_SERVICE_PASSWORD,
-                authentication=SIMPLE,
-                auto_bind=True,
-                raise_exceptions=True
-            )
-        except LDAPBindError as e:
-            logger.error(f"AD bind failed: {e}")
-            raise HTTPException(
-                status_code=503,
-                detail=f"AD bind failed. Check service account password. Error: {str(e)}"
-            )
-        except Exception as e:
-            logger.error(f"AD connection error: {e}")
-            raise HTTPException(status_code=503, detail=f"AD error: {e}")
-
-    def _get_fresh_target_ou(self):
-        db = SessionLocal()
-        try:
-            s = db.query(AppSetting).filter(AppSetting.key == 'ad_default_user_ou').first()
-            return s.value if (s and s.value) else self.target_ou
-        finally:
-            db.close()
-
-    def _get_lockout_duration(self):
-        if (self._lockout_cache is not None
-                and self._lockout_cached_at is not None
-                and (datetime.utcnow() - self._lockout_cached_at).total_seconds() < 3600):
-            return self._lockout_cache
-        try:
-            conn = self._get_connection()
-            conn.search(
-                search_base=self.base_dn,
-                search_filter='(objectClass=domain)',
-                attributes=['lockoutDuration']
-            )
-            d = 30 * 60
-            if conn.entries:
-                dur = conn.entries[0].lockoutDuration.value
-                if dur:
-                    if isinstance(dur, int):
-                        d = abs(dur) / 10_000_000
-                    elif hasattr(dur, 'total_seconds'):
-                        d = abs(dur.total_seconds())
-            conn.unbind()
-            self._lockout_cache     = d
-            self._lockout_cached_at = datetime.utcnow()
-            return d
-        except:
-            return 30 * 60
-
-    def _is_user_locked(self, lv, ld):
-        if not lv: return False
-        try:
-            dt = None
-            if hasattr(lv, 'year'):
-                dt = lv.replace(tzinfo=None) if lv.tzinfo else lv
-            elif isinstance(lv, int) and lv > 0:
-                dt = datetime(1601, 1, 1) + timedelta(seconds=lv / 10_000_000)
-            if not dt: return False
-            t = (datetime.utcnow() - dt).total_seconds()
-            return 0 < t < ld
-        except:
-            return False
-
-    def authenticate_user(self, username, password):
-        if not LDAP_AVAILABLE: return None
-        upn = f"{username}@{self.domain}" if "@" not in username else username
-        try:
-            server = self._get_server(config.AD_SERVER_PRIMARY)
-            conn   = Connection(
-                server, user=upn, password=password,
-                authentication=SIMPLE, auto_bind=True
-            )
-            if conn.bound:
-                info = self.get_user(username.split("@")[0])
-                conn.unbind()
-                return info or {"username": username}
-        except:
-            return None
-        return None
-
-    def get_user(self, username):
-        try:
-            conn = self._get_connection()
-            conn.search(
-                search_base=self.base_dn,
-                search_filter=f"(&(objectClass=user)(objectCategory=person)(sAMAccountName={username}))",
-                search_scope=SUBTREE,
-                attributes=["sAMAccountName", "displayName", "mail",
-                            "userAccountControl", "distinguishedName"]
-            )
-            if not conn.entries:
-                conn.unbind()
-                return None
-            e   = conn.entries[0]
-            uac = safe_int(e.userAccountControl.value, 0)
-            conn.unbind()
-            return {
-                "username":     safe_str(e.sAMAccountName.value),
-                "display_name": safe_str(e.displayName.value),
-                "email":        safe_str(e.mail.value),
-                "enabled":      not bool(uac & 0x0002),
-                "dn":           safe_str(e.distinguishedName.value)
-            }
-        except:
-            return None
-
-    def get_users(self, base_dn=None, search_filter="", show_builtin=False):
-        lf  = (f"(&(objectClass=user)(objectCategory=person){search_filter})"
-               if search_filter else "(&(objectClass=user)(objectCategory=person))")
-        ft  = self._get_fresh_target_ou()
-        sb  = base_dn or ft or self.base_dn
-        ld  = self._get_lockout_duration()
-        conn = self._get_connection()
-        attrs = [
-            "sAMAccountName", "givenName", "sn", "displayName", "userPrincipalName",
-            "mail", "description", "physicalDeliveryOfficeName", "telephoneNumber",
-            "department", "title", "manager", "company", "distinguishedName",
-            "whenCreated", "whenChanged", "lastLogonTimestamp", "pwdLastSet",
-            "userAccountControl", "memberOf", "lockoutTime", "accountExpires", "thumbnailPhoto"
-        ]
-        try:
-            conn.search(
-                search_base=sb, search_filter=lf,
-                search_scope=SUBTREE, attributes=attrs, paged_size=1000
-            )
-        except Exception as e:
-            conn.unbind()
-            raise HTTPException(status_code=500, detail=f"AD search failed: {e}")
-        users = []
-        for e in conn.entries:
-            try:
-                un = safe_str(e.sAMAccountName.value)
-                dn = safe_str(e.distinguishedName.value)
-                if not show_builtin:
-                    if is_builtin_user(un): continue
-                    if is_in_builtin_container(dn): continue
-                uac = safe_int(e.userAccountControl.value, 0)
-                dis = bool(uac & 0x0002)
-                loc = self._is_user_locked(e.lockoutTime.value, ld)
-                st  = "locked" if loc else ("disabled" if dis else "active")
-                pr  = e.pwdLastSet.value
-                pe  = ""
-                mc  = False
-                if pr is None or pr == "":
-                    mc = True
-                elif isinstance(pr, int):
-                    mc = (pr == 0)
-                    if pr > 0:
-                        try:
-                            pe = (
-                                datetime(1601, 1, 1)
-                                + timedelta(seconds=pr / 10_000_000)
-                                + timedelta(days=90)
-                            ).isoformat()
-                        except: pass
-                elif hasattr(pr, 'isoformat'):
-                    try: pe = (pr + timedelta(days=90)).isoformat()
-                    except: pass
-                gr = []
-                try:
-                    if e.memberOf.values:
-                        gr = [safe_str(g) for g in e.memberOf.values]
-                except: pass
-                hp = False
-                try:
-                    if e.thumbnailPhoto.value: hp = True
-                except: pass
-                users.append({
-                    "id":          dn,
-                    "username":    un,
-                    "firstName":   safe_str(e.givenName.value),
-                    "lastName":    safe_str(e.sn.value),
-                    "displayName": safe_str(e.displayName.value),
-                    "upn":         safe_str(e.userPrincipalName.value),
-                    "email":       safe_str(e.mail.value),
-                    "description": safe_str(e.description.value),
-                    "office":      safe_str(e.physicalDeliveryOfficeName.value),
-                    "phone":       safe_str(e.telephoneNumber.value),
-                    "department":  safe_str(e.department.value),
-                    "title":       safe_str(e.title.value),
-                    "manager":     safe_str(e.manager.value),
-                    "company":     safe_str(e.company.value),
-                    "ou":          ",".join(dn.split(",")[1:]) if dn else "",
-                    "groups":      gr,
-                    "status":      st,
-                    "enabled":     not dis,
-                    "locked":      loc,
-                    "created":     safe_datetime_str(e.whenCreated.value),
-                    "modified":    safe_datetime_str(e.whenChanged.value),
-                    "lastLogon":   safe_datetime_str(e.lastLogonTimestamp.value),
-                    "passwordExpiry":       pe,
-                    "passwordNeverExpires": bool(uac & 0x10000),
-                    "mustChangePassword":   mc,
-                    "isBuiltin":   is_builtin_user(un),
-                    "hasPhoto":    hp,
-                })
-            except: continue
-        conn.unbind()
-        return users
-
-    def get_user_photo(self, username):
-        try:
-            conn = self._get_connection()
-            conn.search(
-                search_base=self.base_dn,
-                search_filter=f"(&(objectClass=user)(sAMAccountName={username}))",
-                attributes=["thumbnailPhoto"]
-            )
-            if not conn.entries:
-                conn.unbind()
-                return None
-            p = conn.entries[0].thumbnailPhoto.value
-            conn.unbind()
-            if p:
-                if isinstance(p, bytes): return p
-                elif isinstance(p, list) and len(p) > 0:
-                    return p[0] if isinstance(p[0], bytes) else None
-            return None
-        except:
-            return None
-
-    def set_user_photo(self, username, photo_bytes):
-        conn = self._get_connection()
-        try:
-            u = self._find_user(conn, username)
-            if not u: conn.unbind(); return False, "User not found"
-            if len(photo_bytes) > 100000:
-                conn.unbind(); return False, "Photo too large (max 100KB)"
-            r = conn.modify(
-                safe_str(u.distinguishedName.value),
-                {"thumbnailPhoto": [(MODIFY_REPLACE, [photo_bytes])]}
-            )
-            conn.unbind()
-            return r, "Photo uploaded" if r else f"Failed: {conn.result}"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def delete_user_photo(self, username):
-        conn = self._get_connection()
-        try:
-            u = self._find_user(conn, username)
-            if not u: conn.unbind(); return False, "User not found"
-            r = conn.modify(
-                safe_str(u.distinguishedName.value),
-                {"thumbnailPhoto": [(MODIFY_REPLACE, [])]}
-            )
-            conn.unbind()
-            return r, "Photo deleted" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def create_user(self, data):
-        """Two-step user creation - avoids empty attribute and UAC errors"""
-        conn   = self._get_connection()
-        ou     = data.get("ou") or self.target_ou
-        un     = data.get("username", "").strip()
-        dn_name = data.get("displayName", "").strip() or un
-        if not un:
-            conn.unbind(); return False, "Username required"
-        dn = f"CN={dn_name},{ou}"
-        # Build UPN - always ensure valid format
-        upn = clean_value(data.get("upn")) or f"{un}@{self.domain}"
-        if upn and '@' not in upn:
-            upn = f"{upn}@{self.domain}"
-        attrs = {
-            "objectClass":    ["top", "person", "organizationalPerson", "user"],
-            "sAMAccountName": un,
-            "displayName":    dn_name,
-            "userPrincipalName": upn,
-        }
-        # Only add optional attributes if they have values
-        opt = {
-            "givenName":                   data.get("firstName"),
-            "sn":                          data.get("lastName"),
-            "mail":                        data.get("email"),
-            "department":                  data.get("department"),
-            "title":                       data.get("title"),
-            "company":                     data.get("company"),
-            "description":                 data.get("description"),
-            "physicalDeliveryOfficeName":  data.get("office"),
-            "telephoneNumber":             data.get("phone"),
-        }
-        for k, v in opt.items():
-            c = clean_value(v)
-            if c: attrs[k] = c
-        logger.info(f"Creating user '{un}' at DN: {dn}")
-        try:
-            r = conn.add(dn, attributes=attrs)
-            if not r:
-                msg = f"{conn.result.get('description','Unknown')}: {conn.result.get('message','')[:200]}"
-                logger.error(f"LDAP add failed: {msg}")
-                conn.unbind(); return False, msg
-            # Step 2: Set password
-            pw = data.get("password", "")
-            if pw:
-                pv = f'"{pw}"'.encode("utf-16-le")
-                pr = conn.modify(dn, {"unicodePwd": [(MODIFY_REPLACE, [pv])]})
-                if not pr:
-                    logger.error(f"Password set failed: {conn.result}")
-                    try: conn.delete(dn)
-                    except: pass
-                    conn.unbind()
-                    return False, f"Password failed: {conn.result.get('message','')[:100]}"
-            # Step 3: Set userAccountControl
-            uac = 512
-            if data.get("passwordNeverExpires"): uac |= 0x10000
-            conn.modify(dn, {"userAccountControl": [(MODIFY_REPLACE, [uac])]})
-            if data.get("mustChangePassword"):
-                conn.modify(dn, {"pwdLastSet": [(MODIFY_REPLACE, [0])]})
-            conn.unbind()
-            logger.info(f"OK: User '{un}' created")
-            return True, f"User {un} created"
-        except Exception as e:
-            logger.error(f"Exception: {e}")
-            try: conn.delete(dn)
-            except: pass
-            conn.unbind(); return False, str(e)
-
-    def delete_user(self, username):
-        """Delete a user from Active Directory"""
-        if is_builtin_user(username):
-            return False, f"Cannot delete built-in account '{username}'"
-        conn = self._get_connection()
-        try:
-            u = self._find_user(conn, username)
-            if not u:
-                conn.unbind()
-                return False, f"User '{username}' not found"
-            dn = safe_str(u.distinguishedName.value)
-            r  = conn.delete(dn)
-            conn.unbind()
-            return r, f"User {username} deleted" if r else f"Failed: {conn.result}"
-        except Exception as e:
-            conn.unbind()
-            return False, str(e)
-
-    def update_user(self, username, data):
-        """Update user attributes in Active Directory"""
-        conn = self._get_connection()
-        try:
-            u = self._find_user(conn, username)
-            if not u:
-                conn.unbind()
-                return False, f"User '{username}' not found"
-            dn = safe_str(u.distinguishedName.value)
-            ch = {}
-            fm = {
-                "firstName":   "givenName",
-                "lastName":    "sn",
-                "displayName": "displayName",
-                "email":       "mail",
-                "department":  "department",
-                "title":       "title",
-                "company":     "company",
-                "description": "description",
-                "office":      "physicalDeliveryOfficeName",
-                "phone":       "telephoneNumber",
-                "manager":     "manager",
-                "upn":         "userPrincipalName",
-            }
-            for fk, aa in fm.items():
-                if fk in data:
-                    c = clean_value(data[fk])
-                    if c:
-                        if aa == "userPrincipalName":
-                            # Ensure valid UPN format
-                            if '@' not in c:
-                                c = f"{c}@{config.AD_DOMAIN}"  # ✅ FIXED
-                            ch[aa] = [(MODIFY_REPLACE, [c])]
-                        else:
-                            ch[aa] = [(MODIFY_REPLACE, [c])]
-                    else:
-                        if aa == "userPrincipalName":
-                            continue  # ✅ Never send empty UPN to AD
-                        else:
-                            ch[aa] = [(MODIFY_REPLACE, [])]
-            if "passwordNeverExpires" in data or "accountDisabled" in data:
-                uac = safe_int(u.userAccountControl.value, 512)
-                if "passwordNeverExpires" in data:
-                    if data["passwordNeverExpires"]: uac |= 0x10000
-                    else: uac &= ~0x10000
-                if "accountDisabled" in data:
-                    if data["accountDisabled"]: uac |= 0x0002
-                    else: uac &= ~0x0002
-                ch["userAccountControl"] = [(MODIFY_REPLACE, [uac])]
-            if not ch:
-                conn.unbind(); return False, "No changes"
-            r = conn.modify(dn, ch)
-            if not r:
-                msg = f"Failed: {conn.result}"
-                conn.unbind(); return False, msg
-            conn.unbind()
-            return True, f"User {username} updated"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def move_user(self, username, target_ou):
-        conn = self._get_connection()
-        try:
-            u = self._find_user(conn, username)
-            if not u: conn.unbind(); return False, f"User '{username}' not found"
-            cdn = safe_str(u.distinguishedName.value)
-            rdn = cdn.split(",")[0]
-            r   = conn.modify_dn(cdn, rdn, new_superior=target_ou)
-            conn.unbind()
-            return r, "User moved" if r else f"Failed: {conn.result}"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def disable_user(self, username):
-        conn = self._get_connection()
-        try:
-            u = self._find_user(conn, username)
-            if not u: conn.unbind(); return False, "Not found"
-            uac = safe_int(u.userAccountControl.value, 512) | 0x0002
-            r   = conn.modify(
-                safe_str(u.distinguishedName.value),
-                {"userAccountControl": [(MODIFY_REPLACE, [uac])]}
-            )
-            conn.unbind()
-            return r, "Disabled" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def enable_user(self, username):
-        conn = self._get_connection()
-        try:
-            u = self._find_user(conn, username)
-            if not u: conn.unbind(); return False, "Not found"
-            uac = safe_int(u.userAccountControl.value, 514) & ~0x0002
-            r   = conn.modify(
-                safe_str(u.distinguishedName.value),
-                {"userAccountControl": [(MODIFY_REPLACE, [uac])]}
-            )
-            conn.unbind()
-            return r, "Enabled" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def unlock_user(self, username):
-        conn = self._get_connection()
-        try:
-            u = self._find_user(conn, username)
-            if not u: conn.unbind(); return False, "Not found"
-            r = conn.modify(
-                safe_str(u.distinguishedName.value),
-                {"lockoutTime": [(MODIFY_REPLACE, [0])]}
-            )
-            conn.unbind()
-            return r, "Unlocked" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def reset_password(self, username, new_password, force_change=True):
-        conn = self._get_connection()
-        try:
-            u = self._find_user(conn, username)
-            if not u: conn.unbind(); return False, "Not found"
-            dn = safe_str(u.distinguishedName.value)
-            pv = f'"{new_password}"'.encode("utf-16-le")
-            r  = conn.modify(dn, {"unicodePwd": [(MODIFY_REPLACE, [pv])]})
-            if r and force_change:
-                conn.modify(dn, {"pwdLastSet": [(MODIFY_REPLACE, [0])]})
-            conn.unbind()
-            return r, "Password reset" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def add_to_group(self, username, group_name):
-        conn = self._get_connection()
-        try:
-            u = self._find_user(conn, username)
-            g = self._find_group(conn, group_name)
-            if not u or not g: conn.unbind(); return False, "Not found"
-            r = conn.modify(
-                safe_str(g.distinguishedName.value),
-                {"member": [(MODIFY_ADD, [safe_str(u.distinguishedName.value)])]}
-            )
-            conn.unbind()
-            return r, "Added" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def remove_from_group(self, username, group_name):
-        conn = self._get_connection()
-        try:
-            u = self._find_user(conn, username)
-            g = self._find_group(conn, group_name)
-            if not u or not g: conn.unbind(); return False, "Not found"
-            r = conn.modify(
-                safe_str(g.distinguishedName.value),
-                {"member": [(MODIFY_DELETE, [safe_str(u.distinguishedName.value)])]}
-            )
-            conn.unbind()
-            return r, "Removed" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def get_groups(self, search=None, show_builtin=False):
-        conn = self._get_connection()
-        f = f"(&(objectClass=group)(cn=*{search}*))" if search else "(objectClass=group)"
-        try:
-            conn.search(
-                search_base=self.base_dn, search_filter=f,
-                search_scope=SUBTREE,
-                attributes=["cn", "description", "groupType", "mail", "member",
-                            "memberOf", "distinguishedName", "whenCreated", "whenChanged"],
-                size_limit=500
-            )
-        except Exception as e:
-            conn.unbind()
-            raise HTTPException(status_code=500, detail=str(e))
-        groups = []
-        for e in conn.entries:
-            try:
-                n  = safe_str(e.cn.value)
-                dn = safe_str(e.distinguishedName.value)
-                if not show_builtin:
-                    if is_builtin_group(n): continue
-                    if is_in_builtin_container(dn): continue
-                gt  = safe_int(e.groupType.value, 0)
-                sec = bool(gt & 0x80000000)
-                sc  = {4: "domain-local", 2: "global", 8: "universal"}.get(gt & 0xF, "global")
-                m   = [safe_str(x) for x in (e.member.values or [])] if e.member else []
-                groups.append({
-                    "id":          dn,
-                    "name":        n,
-                    "description": safe_str(e.description.value),
-                    "type":        "security" if sec else "distribution",
-                    "scope":       sc,
-                    "email":       safe_str(e.mail.value),
-                    "memberCount": len(m),
-                    "members":     m,
-                    "memberOf":    [safe_str(x) for x in (e.memberOf.values or [])] if e.memberOf else [],
-                    "ou":          ",".join(dn.split(",")[1:]) if dn else "",
-                    "created":     safe_datetime_str(e.whenCreated.value),
-                    "modified":    safe_datetime_str(e.whenChanged.value),
-                    "isBuiltin":   is_builtin_group(n),
-                })
-            except: pass
-        conn.unbind()
-        return groups
-
-    def create_group(self, name, description, ou, group_type, scope):
-        conn = self._get_connection()
-        tv   = 0x80000000 if group_type == "security" else 0
-        sv   = {"global": 2, "domain-local": 4, "universal": 8}.get(scope, 2)
-        gt   = tv | sv
-        if gt > 0x7FFFFFFF: gt -= 0x100000000
-        dn   = f"CN={name},{ou}"
-        try:
-            attrs = {
-                "objectClass":    ["top", "group"],
-                "sAMAccountName": name,
-                "groupType":      gt,
-            }
-            cd = clean_value(description)
-            if cd: attrs["description"] = cd
-            r = conn.add(dn, attributes=attrs)
-            conn.unbind()
-            return r, "Group created" if r else f"Failed: {conn.result}"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def delete_group(self, group_name):
-        if is_builtin_group(group_name):
-            return False, "Cannot delete built-in group"
-        conn = self._get_connection()
-        try:
-            g = self._find_group(conn, group_name)
-            if not g: conn.unbind(); return False, "Not found"
-            r = conn.delete(safe_str(g.distinguishedName.value))
-            conn.unbind()
-            return r, "Deleted" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def get_group_members(self, group_name):
-        conn = self._get_connection()
-        try:
-            g = self._find_group(conn, group_name)
-            if not g: conn.unbind(); return None
-            mds = [safe_str(m) for m in (g.member.values or [])] if g.member else []
-            members = []
-            for md in mds:
-                try:
-                    conn.search(
-                        search_base=md,
-                        search_filter="(objectClass=*)",
-                        attributes=["sAMAccountName", "displayName", "mail",
-                                    "userAccountControl", "objectClass"]
-                    )
-                    if conn.entries:
-                        e   = conn.entries[0]
-                        uac = safe_int(e.userAccountControl.value, 0)
-                        members.append({
-                            "dn":          md,
-                            "username":    safe_str(e.sAMAccountName.value),
-                            "displayName": safe_str(e.displayName.value),
-                            "email":       safe_str(e.mail.value),
-                            "enabled":     not bool(uac & 0x0002),
-                            "type":        "user" if "user" in [
-                                safe_str(c).lower() for c in (e.objectClass.values or [])
-                            ] else "other",
-                        })
-                except:
-                    members.append({"dn": md, "displayName": md, "type": "unknown"})
-            conn.unbind()
-            return members
-        except Exception as e:
-            conn.unbind()
-            raise HTTPException(status_code=500, detail=str(e))
-
-    def get_computers(self, search=None):
-        conn = self._get_connection()
-        f = f"(&(objectClass=computer)(cn=*{search}*))" if search else "(objectClass=computer)"
-        try:
-            conn.search(
-                search_base=self.base_dn, search_filter=f,
-                search_scope=SUBTREE,
-                attributes=["cn", "dNSHostName", "operatingSystem", "operatingSystemVersion",
-                            "description", "distinguishedName", "lastLogonTimestamp",
-                            "whenCreated", "whenChanged", "userAccountControl", "managedBy"],
-                size_limit=500
-            )
-        except Exception as e:
-            conn.unbind()
-            raise HTTPException(status_code=500, detail=str(e))
-        comps = []
-        for e in conn.entries:
-            try:
-                uac  = safe_int(e.userAccountControl.value, 0)
-                dis  = bool(uac & 0x0002)
-                ll   = e.lastLogonTimestamp.value
-                days = 999
-                if ll and hasattr(ll, 'year'):
-                    try: days = (datetime.utcnow() - ll.replace(tzinfo=None)).days
-                    except: pass
-                st = "disabled" if dis else ("inactive" if days > 90 else "active")
-                dn = safe_str(e.distinguishedName.value)
-                comps.append({
-                    "id":          dn,
-                    "name":        safe_str(e.cn.value),
-                    "dnsName":     safe_str(e.dNSHostName.value),
-                    "os":          safe_str(e.operatingSystem.value),
-                    "osVersion":   safe_str(e.operatingSystemVersion.value),
-                    "description": safe_str(e.description.value),
-                    "ou":          ",".join(dn.split(",")[1:]) if dn else "",
-                    "status":      st,
-                    "enabled":     not dis,
-                    "lastLogon":   safe_datetime_str(ll),
-                    "created":     safe_datetime_str(e.whenCreated.value),
-                    "modified":    safe_datetime_str(e.whenChanged.value),
-                    "managedBy":   safe_str(e.managedBy.value),
-                })
-            except: pass
-        conn.unbind()
-        return comps
-
-    def create_computer(self, name, ou, description=""):
-        conn = self._get_connection()
-        try:
-            dn    = f"CN={name},{ou}"
-            attrs = {
-                "objectClass":      ["top", "person", "organizationalPerson", "user", "computer"],
-                "cn":               name,
-                "sAMAccountName":   f"{name}$",
-                "userAccountControl": 4096,
-            }
-            cd = clean_value(description)
-            if cd: attrs["description"] = cd
-            r = conn.add(dn, attributes=attrs)
-            conn.unbind()
-            return r, f"Computer {name} created" if r else f"Failed: {conn.result}"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def delete_computer(self, name):
-        conn = self._get_connection()
-        try:
-            conn.search(
-                search_base=self.base_dn,
-                search_filter=f"(&(objectClass=computer)(cn={name}))",
-                attributes=["distinguishedName"]
-            )
-            if not conn.entries: conn.unbind(); return False, "Not found"
-            r = conn.delete(safe_str(conn.entries[0].distinguishedName.value))
-            conn.unbind()
-            return r, "Deleted" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def enable_computer(self, name):
-        conn = self._get_connection()
-        try:
-            conn.search(
-                search_base=self.base_dn,
-                search_filter=f"(&(objectClass=computer)(cn={name}))",
-                attributes=["distinguishedName", "userAccountControl"]
-            )
-            if not conn.entries: conn.unbind(); return False, "Not found"
-            e   = conn.entries[0]
-            uac = safe_int(e.userAccountControl.value, 4096) & ~0x0002
-            r   = conn.modify(
-                safe_str(e.distinguishedName.value),
-                {"userAccountControl": [(MODIFY_REPLACE, [uac])]}
-            )
-            conn.unbind()
-            return r, "Enabled" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def disable_computer(self, name):
-        conn = self._get_connection()
-        try:
-            conn.search(
-                search_base=self.base_dn,
-                search_filter=f"(&(objectClass=computer)(cn={name}))",
-                attributes=["distinguishedName", "userAccountControl"]
-            )
-            if not conn.entries: conn.unbind(); return False, "Not found"
-            e   = conn.entries[0]
-            uac = safe_int(e.userAccountControl.value, 4096) | 0x0002
-            r   = conn.modify(
-                safe_str(e.distinguishedName.value),
-                {"userAccountControl": [(MODIFY_REPLACE, [uac])]}
-            )
-            conn.unbind()
-            return r, "Disabled" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def move_computer(self, name, target_ou):
-        conn = self._get_connection()
-        try:
-            conn.search(
-                search_base=self.base_dn,
-                search_filter=f"(&(objectClass=computer)(cn={name}))",
-                attributes=["distinguishedName"]
-            )
-            if not conn.entries: conn.unbind(); return False, "Not found"
-            cdn = safe_str(conn.entries[0].distinguishedName.value)
-            r   = conn.modify_dn(cdn, cdn.split(",")[0], new_superior=target_ou)
-            conn.unbind()
-            return r, "Moved" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def get_ou_tree(self):
-        conn = self._get_connection()
-        try:
-            conn.search(
-                search_base=self.base_dn,
-                search_filter="(objectClass=organizationalUnit)",
-                search_scope=SUBTREE,
-                attributes=["ou", "description", "distinguishedName"]
-            )
-        except Exception as e:
-            conn.unbind()
-            raise HTTPException(status_code=500, detail=str(e))
-        ous = []
-        for e in conn.entries:
-            try:
-                dn = safe_str(e.distinguishedName.value)
-                p  = ",".join(dn.split(",")[1:])
-                ous.append({
-                    "id":          dn,
-                    "name":        safe_str(e.ou.value),
-                    "dn":          dn,
-                    "description": safe_str(e.description.value),
-                    "parent":      p if p != self.base_dn else None,
-                })
-            except: pass
-        conn.unbind()
-        return ous
-
-    def create_ou(self, name, parent, description):
-        conn = self._get_connection()
-        dn   = f"OU={name},{parent}"
-        try:
-            attrs = {"objectClass": ["top", "organizationalUnit"], "ou": name}
-            cd = clean_value(description)
-            if cd: attrs["description"] = cd
-            r = conn.add(dn, attributes=attrs)
-            conn.unbind()
-            return r, "OU created" if r else f"Failed: {conn.result}"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def delete_ou(self, dn):
-        conn = self._get_connection()
-        try:
-            r = conn.delete(dn)
-            conn.unbind()
-            return r, "OU deleted" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def update_ou(self, dn, description):
-        conn = self._get_connection()
-        try:
-            cd = clean_value(description)
-            ch = {"description": [(MODIFY_REPLACE, [cd])] if cd else [(MODIFY_REPLACE, [])]}
-            r  = conn.modify(dn, ch)
-            conn.unbind()
-            return r, "OU updated" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
-
-    def get_ou_contents(self, dn):
-        conn = self._get_connection()
-        try:
-            conn.search(
-                search_base=dn,
-                search_filter="(objectClass=*)",
-                search_scope=LEVEL,
-                attributes=["objectClass", "cn", "ou", "sAMAccountName", "displayName",
-                            "description", "distinguishedName", "userAccountControl"]
-            )
-            users, groups, computers, ous = [], [], [], []
-            for e in conn.entries:
-                try:
-                    cl = [safe_str(c).lower() for c in (e.objectClass.values or [])]
-                    od = safe_str(e.distinguishedName.value)
-                    if "organizationalunit" in cl:
-                        ous.append({
-                            "name": safe_str(e.ou.value), "dn": od,
-                            "description": safe_str(e.description.value)
-                        })
-                    elif "computer" in cl:
-                        uac = safe_int(e.userAccountControl.value, 0)
-                        computers.append({
-                            "name": safe_str(e.cn.value), "dn": od,
-                            "enabled": not bool(uac & 0x0002)
-                        })
-                    elif "group" in cl:
-                        groups.append({
-                            "name": safe_str(e.cn.value), "dn": od,
-                            "description": safe_str(e.description.value)
-                        })
-                    elif "user" in cl:
-                        uac = safe_int(e.userAccountControl.value, 0)
-                        users.append({
-                            "username":    safe_str(e.sAMAccountName.value),
-                            "displayName": safe_str(e.displayName.value),
-                            "dn":          od,
-                            "enabled":     not bool(uac & 0x0002),
-                        })
-                except: pass
-            conn.unbind()
-            return {
-                "dn": dn, "users": users, "groups": groups,
-                "computers": computers, "ous": ous,
-                "counts": {
-                    "users": len(users), "groups": len(groups),
-                    "computers": len(computers), "ous": len(ous)
-                }
-            }
-        except Exception as e:
-            conn.unbind()
-            raise HTTPException(status_code=500, detail=str(e))
-
-    def get_gpos(self):
-        """Get GPOs with fallback search and proper error handling"""
-        conn  = self._get_connection()
-        gpos  = []
-        search_bases = [
-            f"CN=Policies,CN=System,{self.base_dn}",
-            f"CN=System,{self.base_dn}",
-            self.base_dn
-        ]
-        for sb in search_bases:
-            try:
-                logger.info(f"Searching GPOs in: {sb}")
-                conn.search(
-                    search_base=sb,
-                    search_filter="(objectClass=groupPolicyContainer)",
-                    search_scope=SUBTREE,
-                    attributes=["cn", "displayName", "gPCFileSysPath", "versionNumber",
-                                "flags", "whenCreated", "whenChanged", "distinguishedName"]
-                )
-                if conn.entries:
-                    logger.info(f"Found {len(conn.entries)} GPOs in {sb}")
-                    for e in conn.entries:
-                        try:
-                            fl = safe_int(e.flags.value, 0)
-                            ud = bool(fl & 1)
-                            cd = bool(fl & 2)
-                            st = ("disabled" if (ud and cd)
-                                  else "user-disabled" if ud
-                                  else "computer-disabled" if cd
-                                  else "enabled")
-                            gpos.append({
-                                "id":              safe_str(e.cn.value),
-                                "name":            safe_str(e.displayName.value) or safe_str(e.cn.value),
-                                "guid":            safe_str(e.cn.value),
-                                "path":            safe_str(e.gPCFileSysPath.value),
-                                "version":         safe_int(e.versionNumber.value, 0),
-                                "status":          st,
-                                "userEnabled":     not ud,
-                                "computerEnabled": not cd,
-                                "dn":              safe_str(e.distinguishedName.value),
-                                "created":         safe_datetime_str(e.whenCreated.value),
-                                "modified":        safe_datetime_str(e.whenChanged.value),
-                            })
-                        except: pass
-                    break
-                else:
-                    logger.info(f"No GPOs in {sb}, trying next...")
-            except Exception as ex:
-                logger.warning(f"GPO search failed in {sb}: {ex}")
-                continue
-        conn.unbind()
-        if not gpos: logger.warning("No GPOs found in any location")
-        return gpos
-
-    def get_gpo_links(self):
-        conn = self._get_connection()
-        try:
-            conn.search(
-                search_base=self.base_dn,
-                search_filter="(gPLink=*)",
-                search_scope=SUBTREE,
-                attributes=["ou", "name", "distinguishedName", "gPLink", "objectClass"]
-            )
-            links = []
-            for e in conn.entries:
-                try:
-                    gl = safe_str(e.gPLink.value)
-                    if not gl: continue
-                    lg      = []
-                    matches = re.findall(r'\[LDAP://([^;]+);(\d+)\]', gl, re.IGNORECASE)
-                    for gdn, fl in matches:
-                        guid = gdn.split(',')[0].replace('CN=', '').replace('cn=', '')
-                        lg.append({
-                            "guid":     guid,
-                            "enabled":  not (int(fl) & 1),
-                            "enforced": bool(int(fl) & 2),
-                            "dn":       gdn,
-                        })
-                    if lg:
-                        n = safe_str(e.ou.value) or safe_str(e.name.value) or "Domain Root"
-                        links.append({
-                            "ou":   n,
-                            "dn":   safe_str(e.distinguishedName.value),
-                            "gpos": lg,
-                        })
-                except: pass
-            conn.unbind()
-            logger.info(f"Found {len(links)} GPO links")
-            return links
-        except Exception as ex:
-            conn.unbind()
-            logger.error(f"GPO links failed: {ex}")
-            return []
-
-    def test_connection(self, custom_settings=None):
-        if not LDAP_AVAILABLE:
-            return {"connected": False, "error": "ldap3 not installed"}
-        s    = custom_settings or {}
-        addr = s.get("ad_server_primary",  config.AD_SERVER_PRIMARY)
-        port = int(s.get("ad_port",        config.AD_PORT))
-        ssl  = str(s.get("ad_use_ldaps",   config.AD_USE_LDAPS)).lower() == "true"
-        acc  = s.get("ad_service_account", config.AD_SERVICE_ACCOUNT)
-        pwd  = s.get("ad_service_password",config.AD_SERVICE_PASSWORD)
-        bdn  = s.get("ad_base_dn",         config.AD_BASE_DN)
-        try:
-            server = Server(addr, port=port, use_ssl=ssl, get_info=ALL)
-            conn   = Connection(
-                server, user=acc, password=pwd,
-                authentication=SIMPLE, auto_bind=True, raise_exceptions=True
-            )
-            conn.search(
-                search_base=bdn,
-                search_filter="(objectClass=*)",
-                attributes=["distinguishedName"],
-                size_limit=1
-            )
-            conn.unbind()
-            return {
-                "connected": True, "success": True,
-                "message":   f"Connected to {addr}:{port}",
-                "server":    addr, "port": port,
-                "ldaps":     ssl,  "base_dn": bdn,
-            }
-        except Exception as e:
-            return {
-                "connected": False, "success": False,
-                "error": str(e), "server": addr, "port": port,
-            }
-
-    def _find_user(self, conn, username):
-        conn.search(
-            search_base=self.base_dn,
-            search_filter=f"(&(objectClass=user)(objectCategory=person)(sAMAccountName={username}))",
-            search_scope=SUBTREE,
-            attributes=["distinguishedName", "userAccountControl", "pwdLastSet", "lockoutTime"]
-        )
-        return conn.entries[0] if conn.entries else None
-
-    def _find_group(self, conn, group_name):
-        conn.search(
-            search_base=self.base_dn,
-            search_filter=f"(&(objectClass=group)(cn={group_name}))",
-            search_scope=SUBTREE,
-            attributes=["distinguishedName", "member"]
-        )
-        return conn.entries[0] if conn.entries else None
-
-
-ad_service = ADService()
-# ─── Auth Helpers ────────────────────────────────────────────
-pwd_context  = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
-
-class Token(BaseModel):
-    access_token: str
-    token_type:   str
-    role:         str
-    display_name: str
-    username:     str
-
-def create_access_token(data):
-    to_encode = data.copy()
-    to_encode.update({
-        "exp": datetime.utcnow() + timedelta(minutes=config.ACCESS_TOKEN_EXPIRE_MINUTES)
-    })
-    return jwt.encode(to_encode, config.SECRET_KEY, algorithm=config.ALGORITHM)
-
-def hash_token(token):
-    return hashlib.sha256(token.encode()).hexdigest()[:32]
-
-def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-):
-    err = HTTPException(status_code=401, detail="Invalid or expired token")
-    try:
-        payload  = jwt.decode(token, config.SECRET_KEY, algorithms=[config.ALGORITHM])
-        username = payload.get("sub")
-        if not username: raise err
-    except JWTError:
-        raise err
-    user = db.query(AppUser).filter(AppUser.username == username).first()
-    if not user or not user.active: raise err
-    try:
-        th = hash_token(token)
-        s  = db.query(ActiveSession).filter(ActiveSession.token_hash == th).first()
-        if s:
-            s.last_activity = datetime.utcnow()
-            db.commit()
-    except: pass
-    return user
-
-def require_admin(current_user: AppUser = Depends(get_current_user)):
-    if current_user.role != "Admin":
-        raise HTTPException(status_code=403, detail="Admin required")
-    return current_user
-
-def log_action(db, operator, role, action, obj_type, obj_name, details, result, ip=""):
-    try:
-        db.add(AuditLog(
-            operator=operator, operator_role=role, action=action,
-            object_type=obj_type, object_name=obj_name,
-            details=details, status=result, ip_address=ip
-        ))
-        db.commit()
-    except: pass
-
-def get_client_ip(r):
-    if not r: return "unknown"
-    f = r.headers.get("X-Forwarded-For")
-    if f: return f.split(",")[0].strip()
-    return r.client.host if r.client else "unknown"
-
-def get_user_agent(r):
-    if not r: return ""
-    return r.headers.get("User-Agent", "")[:500]
-
-def send_email(to, subject, html_body, db):
-    try:
-        ss  = db.query(AppSetting).filter(AppSetting.key == "notify_smtp_server").first()
-        sp  = db.query(AppSetting).filter(AppSetting.key == "notify_smtp_port").first()
-        su  = db.query(AppSetting).filter(AppSetting.key == "notify_smtp_user").first()
-        spw = db.query(AppSetting).filter(AppSetting.key == "notify_smtp_password").first()
-        fe  = db.query(AppSetting).filter(AppSetting.key == "notify_from_email").first()
-        if not ss or not ss.value: return False, "SMTP not configured"
-        msg          = MIMEMultipart()
-        msg['From']  = fe.value if fe else "noreply@admanager.local"
-        msg['To']    = to
-        msg['Subject'] = subject
-        msg.attach(MIMEText(html_body, 'html'))
-        server = smtplib.SMTP(ss.value, int(sp.value or 587), timeout=10)
-        server.starttls()
-        if su and su.value:
-            pwd = decrypt_value(spw.value) if spw and spw.value else ""
-            server.login(su.value, pwd)
-        server.send_message(msg)
-        server.quit()
-        return True, "Email sent"
-    except Exception as e:
-        return False, str(e)
-
-# ─── FastAPI App ─────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app):
     logger.info("AD Manager Pro v2.2.2 Starting")
     db = SessionLocal()
     try:
         init_default_settings(db)
-        reload_config_from_db(db)
+        reload_config_from_db(db, ad_service)
     finally:
         db.close()
     yield
 
-app = FastAPI(
-    title="AD Manager Pro API",
-    version="2.2.2",
-    lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173", "http://localhost:3000",
-        "https://localhost:8443", "http://localhost",
-        "https://localhost", "*"
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
-)
+app = FastAPI(title="AD Manager Pro API", version="2.2.2", lifespan=lifespan, docs_url="/docs", redoc_url="/redoc")
+app.add_middleware(CORSMiddleware,
+    allow_origins=["http://localhost:5173","http://localhost:3000","https://localhost:8443","http://localhost","https://localhost","*"],
+    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# ═══ Health & Auth ═══════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# HEALTH & AUTH
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/health")
 async def health():
-    return {
-        "status":    "healthy",
-        "ldap":      LDAP_AVAILABLE,
-        "domain":    config.AD_DOMAIN,
-        "server":    config.AD_SERVER_PRIMARY,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return {"status":"healthy","ldap":LDAP_AVAILABLE,"domain":config.AD_DOMAIN,
+        "server":config.AD_SERVER_PRIMARY,"timestamp":datetime.utcnow().isoformat()}
 
 @app.get("/api/ad/test")
 async def test_ad(cu: AppUser = Depends(get_current_user)):
@@ -1559,94 +67,57 @@ async def test_ad(cu: AppUser = Depends(get_current_user)):
     return r
 
 @app.post("/api/auth/login", response_model=Token)
-async def login(
-    fd: OAuth2PasswordRequestForm = Depends(),
-    request: Request = None,
-    db: Session = Depends(get_db)
-):
+async def login(fd: OAuth2PasswordRequestForm = Depends(), request: Request = None, db: Session = Depends(get_db)):
     ip = get_client_ip(request)
-    # Case-insensitive username matching + strip whitespace
     username = fd.username.strip().lower()
-    au = db.query(AppUser).filter(
-        AppUser.username.ilike(username),
-        AppUser.active == True
-    ).first()
+    au = db.query(AppUser).filter(AppUser.username.ilike(username), AppUser.active == True).first()
     if not au:
-        logger.warning(f"Login FAILED: '{fd.username}' not in app_users table")
-        log_action(db, fd.username, "Unknown", "Login Failed", "Auth",
-                   fd.username, "Not authorized", "Failed", ip)
+        log_action(db, fd.username, "Unknown", "Login Failed", "Auth", fd.username, "Not authorized", "Failed", ip)
         raise HTTPException(status_code=401, detail="User not authorized")
     if not ad_service.authenticate_user(fd.username.strip(), fd.password):
-        logger.warning(f"Login FAILED: '{fd.username}' bad AD credentials from {ip}")
-        log_action(db, fd.username, au.role, "Login Failed", "Auth",
-                   fd.username, "Bad credentials", "Failed", ip)
+        log_action(db, fd.username, au.role, "Login Failed", "Auth", fd.username, "Bad credentials", "Failed", ip)
         raise HTTPException(status_code=401, detail="Invalid AD credentials")
-    au.last_login = datetime.utcnow()
-    db.commit()
+    au.last_login = datetime.utcnow(); db.commit()
     token = create_access_token({"sub": au.username, "role": au.role})
     try:
         th = hash_token(token)
         db.query(ActiveSession).filter(ActiveSession.username == au.username).delete()
-        db.add(ActiveSession(
-            username=au.username, display_name=au.display_name, role=au.role,
-            ip_address=ip, user_agent=get_user_agent(request),
-            login_time=datetime.utcnow(), last_activity=datetime.utcnow(),
-            token_hash=th
-        ))
+        db.add(ActiveSession(username=au.username, display_name=au.display_name, role=au.role,
+            ip_address=ip, user_agent=get_user_agent(request), login_time=datetime.utcnow(),
+            last_activity=datetime.utcnow(), token_hash=th))
         db.commit()
     except: pass
-    log_action(db, au.username, au.role, "Login Success", "Auth",
-               au.username, f"From {ip}", "Success", ip)
-    return {
-        "access_token": token, "token_type": "bearer",
-        "role":         au.role, "display_name": au.display_name,
-        "username":     au.username
-    }
+    log_action(db, au.username, au.role, "Login Success", "Auth", au.username, f"From {ip}", "Success", ip)
+    return {"access_token": token, "token_type": "bearer", "role": au.role,
+        "display_name": au.display_name, "username": au.username}
 
 @app.get("/api/auth/me")
 async def get_me(cu: AppUser = Depends(get_current_user)):
-    return {
-        "username":     cu.username,
-        "display_name": cu.display_name,
-        "email":        cu.email,
-        "role":         cu.role
-    }
+    return {"username": cu.username, "display_name": cu.display_name, "email": cu.email, "role": cu.role}
 
 @app.post("/api/auth/logout")
-async def logout(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-):
+async def logout(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     try:
-        db.query(ActiveSession).filter(
-            ActiveSession.token_hash == hash_token(token)
-        ).delete()
+        db.query(ActiveSession).filter(ActiveSession.token_hash == hash_token(token)).delete()
         db.commit()
     except: pass
     return {"success": True}
 
-# ═══ Settings ════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# SETTINGS
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/settings")
-async def get_settings(
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def get_settings(cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     init_default_settings(db)
     r = {}
     for s in db.query(AppSetting).all():
         v = s.value
-        if s.key in ENCRYPTED_KEYS:
-            v = PASSWORD_MASK if v else ""
+        if s.key in ENCRYPTED_KEYS: v = PASSWORD_MASK if v else ""
         r[s.key] = v
     return r
 
 @app.put("/api/settings")
-async def update_settings(
-    payload: dict,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db),
-    request: Request = None
-):
+async def update_settings(payload: dict, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db), request: Request = None):
     init_default_settings(db)
     updated = []
     for k, v in payload.items():
@@ -1655,142 +126,87 @@ async def update_settings(
         sv = str(v) if v is not None else ""
         if k in ENCRYPTED_KEYS and sv: sv = encrypt_value(sv)
         s = db.query(AppSetting).filter(AppSetting.key == k).first()
-        if s:
-            s.value      = sv
-            s.updated_by = cu.username
-        else:
-            db.add(AppSetting(
-                key=k, value=sv,
-                category=get_setting_category(k),
-                updated_by=cu.username
-            ))
+        if s: s.value = sv; s.updated_by = cu.username
+        else: db.add(AppSetting(key=k, value=sv, category=get_setting_category(k), updated_by=cu.username))
         updated.append(k)
     db.commit()
-    ad_service._lockout_cache     = None
-    ad_service._lockout_cached_at = None
-    reload_config_from_db(db)
+    ad_service._lockout_cache = None; ad_service._lockout_cached_at = None
+    reload_config_from_db(db, ad_service)
     if "ad_service_password" in updated:
-        logger.info("Service password updated via settings - verifying...")
         try:
             tr = ad_service.test_connection()
             if tr.get("connected"): logger.info("OK: New password works!")
-            else: logger.warning(f"WARNING: Connection test failed: {tr}")
-        except Exception as e:
-            logger.warning(f"WARNING: Could not verify: {e}")
-    log_action(db, cu.username, cu.role, "Settings Updated", "Settings",
-               "system", f"{', '.join(updated)}", "Success", get_client_ip(request))
+        except: pass
+    log_action(db, cu.username, cu.role, "Settings Updated", "Settings", "system",
+        f"{', '.join(updated)}", "Success", get_client_ip(request))
     return {"success": True, "message": f"Saved {len(updated)} settings"}
 
 @app.post("/api/settings/test-connection")
-async def test_conn_settings(
-    payload: dict,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def test_conn_settings(payload: dict, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     if payload.get("ad_service_password") == PASSWORD_MASK:
         s = db.query(AppSetting).filter(AppSetting.key == "ad_service_password").first()
         payload["ad_service_password"] = decrypt_value(s.value) if (s and s.value) else ""
     r = ad_service.test_connection(custom_settings=payload)
-    if not r.get("connected"):
-        raise HTTPException(status_code=400, detail=r.get("error", "Failed"))
+    if not r.get("connected"): raise HTTPException(status_code=400, detail=r.get("error", "Failed"))
     return r
 
 @app.post("/api/settings/change-service-password")
-async def change_service_password(
-    payload: dict,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
-    cp  = payload.get("currentPassword", "")
-    np  = payload.get("newPassword", "")
+async def change_service_password(payload: dict, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
+    cp = payload.get("currentPassword", "")
+    np = payload.get("newPassword", "")
     if not np or len(np) < 12:
         raise HTTPException(status_code=400, detail="New password must be at least 12 characters")
-    svc    = config.AD_SERVICE_ACCOUNT
+    svc = config.AD_SERVICE_ACCOUNT
     svc_un = svc.split("@")[0] if "@" in svc else svc
     if cp:
         try:
             server = ad_service._get_server(config.AD_SERVER_PRIMARY)
-            tc     = Connection(server, user=svc, password=cp,
-                                authentication=SIMPLE, auto_bind=True)
+            tc = Connection(server, user=svc, password=cp, authentication=SIMPLE, auto_bind=True)
             tc.unbind()
         except:
             raise HTTPException(status_code=400, detail="Current password is incorrect")
     try:
         conn = ad_service._get_connection()
-        u    = ad_service._find_user(conn, svc_un)
-        if not u:
-            conn.unbind()
-            raise HTTPException(status_code=404, detail=f"Service account '{svc_un}' not found")
+        u = ad_service._find_user(conn, svc_un)
+        if not u: conn.unbind(); raise HTTPException(status_code=404, detail=f"Service account '{svc_un}' not found")
         dn = safe_str(u.distinguishedName.value)
         pv = f'"{np}"'.encode("utf-16-le")
-        r  = conn.modify(dn, {"unicodePwd": [(MODIFY_REPLACE, [pv])]})
+        r = conn.modify(dn, {"unicodePwd": [(MODIFY_REPLACE, [pv])]})
         if not r:
             em = conn.result.get('message', 'Unknown')
-            conn.unbind()
-            raise HTTPException(status_code=500, detail=f"AD password change failed: {em}")
+            conn.unbind(); raise HTTPException(status_code=500, detail=f"AD password change failed: {em}")
         conn.unbind()
-        logger.info(f"Service account password changed in AD for {svc_un}")
     except HTTPException: raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AD password change failed: {str(e)}")
+    except Exception as e: raise HTTPException(status_code=500, detail=f"AD password change failed: {str(e)}")
     try:
         s = db.query(AppSetting).filter(AppSetting.key == "ad_service_password").first()
-        if s:
-            s.value      = encrypt_value(np)
-            s.updated_by = cu.username
-        else:
-            db.add(AppSetting(
-                key="ad_service_password",
-                value=encrypt_value(np),
-                category="ad",
-                updated_by=cu.username
-            ))
+        if s: s.value = encrypt_value(np); s.updated_by = cu.username
+        else: db.add(AppSetting(key="ad_service_password", value=encrypt_value(np), category="ad", updated_by=cu.username))
         db.commit()
-        config.AD_SERVICE_PASSWORD    = np
-        ad_service._lockout_cache     = None
-        ad_service._lockout_cached_at = None
-        reload_config_from_db(db)
-        try:
-            tr = ad_service.test_connection()
-            if tr.get("connected"): logger.info("OK: New password verified")
-            else: logger.warning(f"WARNING: New password may not work: {tr}")
-        except: pass
-        log_action(db, cu.username, cu.role, "Service Password Changed",
-                   "Settings", svc_un, "Password changed", "Success", "")
-        return {"success": True, "message": f"Password changed for {svc} in both AD and app settings"}
+        config.AD_SERVICE_PASSWORD = np
+        ad_service._lockout_cache = None; ad_service._lockout_cached_at = None
+        reload_config_from_db(db, ad_service)
+        log_action(db, cu.username, cu.role, "Service Password Changed", "Settings", svc_un, "Password changed", "Success", "")
+        return {"success": True, "message": f"Password changed for {svc}"}
     except Exception as e:
-        logger.error(f"CRITICAL: AD password changed but DB update failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"AD changed but DB failed: {str(e)}. Update settings manually!"
-        )
+        raise HTTPException(status_code=500, detail=f"AD changed but DB failed: {str(e)}")
 
-# ═══ Users ═══════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# USERS
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/users")
-async def get_users(
-    search: Optional[str] = None,
-    ou: Optional[str] = None,
-    status_filter: Optional[str] = None,
-    show_builtin: Optional[bool] = None,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def get_users(search: Optional[str] = None, ou: Optional[str] = None,
+    status_filter: Optional[str] = None, show_builtin: Optional[bool] = None,
+    cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if show_builtin is None:
         show_builtin = get_setting(db, "show_builtin_users", "false").lower() == "true"
     f = ""
     if search:
-        f = (f"(|(sAMAccountName=*{search}*)(displayName=*{search}*)"
-             f"(givenName=*{search}*)(sn=*{search}*)(mail=*{search}*)(department=*{search}*))")
+        f = f"(|(sAMAccountName=*{search}*)(displayName=*{search}*)(givenName=*{search}*)(sn=*{search}*)(mail=*{search}*)(department=*{search}*))"
     users = ad_service.get_users(base_dn=ou, search_filter=f, show_builtin=show_builtin)
-    if status_filter:
-        users = [u for u in users if u["status"] == status_filter]
-    return {
-        "users":       users,
-        "count":       len(users),
-        "domain":      config.AD_DOMAIN,
-        "ou":          ou or ad_service._get_fresh_target_ou(),
-        "showBuiltin": show_builtin
-    }
+    if status_filter: users = [u for u in users if u["status"] == status_filter]
+    return {"users": users, "count": len(users), "domain": config.AD_DOMAIN,
+        "ou": ou or ad_service._get_fresh_target_ou(), "showBuiltin": show_builtin}
 
 @app.get("/api/users/{username}")
 async def get_one_user(username: str, cu: AppUser = Depends(get_current_user)):
@@ -1799,115 +215,64 @@ async def get_one_user(username: str, cu: AppUser = Depends(get_current_user)):
     return u
 
 @app.post("/api/users")
-async def create_user(
-    data: dict,
-    request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if cu.role not in ["Admin", "Helpdesk"]:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
+async def create_user(data: dict, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     s, m = ad_service.create_user(data)
-    log_action(db, cu.username, cu.role, "User Created", "User",
-               data.get("username", ""), m, "Success" if s else "Failed",
-               get_client_ip(request))
+    log_action(db, cu.username, cu.role, "User Created", "User", data.get("username", ""), m, "Success" if s else "Failed", get_client_ip(request))
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
 @app.put("/api/users/{username}")
-async def update_user(
-    username: str,
-    payload: dict,
-    request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if cu.role not in ["Admin", "Helpdesk"]:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
+async def update_user(username: str, payload: dict, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     s, m = ad_service.update_user(username, payload)
-    log_action(db, cu.username, cu.role, "User Updated", "User",
-               username, m, "Success" if s else "Failed", get_client_ip(request))
+    log_action(db, cu.username, cu.role, "User Updated", "User", username, m, "Success" if s else "Failed", get_client_ip(request))
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
 @app.delete("/api/users/{username}")
-async def delete_user_route(
-    username: str,
-    request: Request,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def delete_user_route(username: str, request: Request, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     s, m = ad_service.delete_user(username)
-    log_action(db, cu.username, cu.role, "User Deleted", "User",
-               username, m, "Success" if s else "Failed", get_client_ip(request))
+    log_action(db, cu.username, cu.role, "User Deleted", "User", username, m, "Success" if s else "Failed", get_client_ip(request))
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
 @app.post("/api/users/{username}/move")
-async def move_user_route(
-    username: str,
-    payload: dict,
-    request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if cu.role not in ["Admin", "Helpdesk"]:
-        raise HTTPException(status_code=403)
+async def move_user_route(username: str, payload: dict, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     tou = payload.get("target_ou", "").strip()
     if not tou: raise HTTPException(status_code=400, detail="target_ou required")
     s, m = ad_service.move_user(username, tou)
-    log_action(db, cu.username, cu.role, "User Moved", "User",
-               username, f"To {tou}", "Success" if s else "Failed",
-               get_client_ip(request))
+    log_action(db, cu.username, cu.role, "User Moved", "User", username, f"To {tou}", "Success" if s else "Failed", get_client_ip(request))
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
 @app.post("/api/users/bulk-import")
-async def bulk_import(
-    payload: dict,
-    request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if cu.role not in ["Admin", "Helpdesk"]:
-        raise HTTPException(status_code=403)
+async def bulk_import(payload: dict, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     ud = payload.get("users", [])
     if not ud: raise HTTPException(status_code=400, detail="No users")
     res = {"total": len(ud), "created": 0, "failed": 0, "errors": [], "success": []}
     for u in ud:
         try:
-            if not u.get("ou"):
-                u["ou"] = ad_service.target_ou
+            if not u.get("ou"): u["ou"] = ad_service.target_ou
             if not u.get("displayName") and u.get("firstName"):
                 u["displayName"] = f"{u.get('firstName','')} {u.get('lastName','')}".strip()
-            # Always generate valid UPN
             if not u.get("upn") or '@' not in str(u.get("upn", "")):
                 u["upn"] = f"{u['username']}@{ad_service.domain}"
             s, m = ad_service.create_user(u)
             if s:
-                res["created"] += 1
-                res["success"].append(u["username"])
-                log_action(db, cu.username, cu.role, "User Created (Bulk)", "User",
-                           u["username"], m, "Success", get_client_ip(request))
+                res["created"] += 1; res["success"].append(u["username"])
+                log_action(db, cu.username, cu.role, "User Created (Bulk)", "User", u["username"], m, "Success", get_client_ip(request))
             else:
-                res["failed"] += 1
-                res["errors"].append({"username": u.get("username", "?"), "error": m})
-                log_action(db, cu.username, cu.role, "User Create Failed (Bulk)", "User",
-                           u.get("username", "?"), m, "Failed", get_client_ip(request))
+                res["failed"] += 1; res["errors"].append({"username": u.get("username", "?"), "error": m})
         except Exception as e:
-            res["failed"] += 1
-            res["errors"].append({"username": u.get("username", "?"), "error": str(e)})
+            res["failed"] += 1; res["errors"].append({"username": u.get("username", "?"), "error": str(e)})
     return res
 
 @app.post("/api/users/bulk-modify")
-async def bulk_modify(
-    payload: dict,
-    request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if cu.role not in ["Admin", "Helpdesk"]:
-        raise HTTPException(status_code=403)
+async def bulk_modify(payload: dict, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     ups = payload.get("updates", [])
     res = {"total": len(ups), "updated": 0, "failed": 0, "errors": [], "success": []}
     for u in ups:
@@ -1916,59 +281,44 @@ async def bulk_modify(
         try:
             s, m = ad_service.update_user(un, u)
             if s:
-                res["updated"] += 1
-                res["success"].append(un)
-                log_action(db, cu.username, cu.role, "User Updated (Bulk)", "User",
-                           un, m, "Success", get_client_ip(request))
+                res["updated"] += 1; res["success"].append(un)
+                log_action(db, cu.username, cu.role, "User Updated (Bulk)", "User", un, m, "Success", get_client_ip(request))
             else:
-                res["failed"] += 1
-                res["errors"].append({"username": un, "error": m})
-                log_action(db, cu.username, cu.role, "User Update Failed (Bulk)", "User",
-                           un, m, "Failed", get_client_ip(request))
+                res["failed"] += 1; res["errors"].append({"username": un, "error": m})
         except Exception as e:
-            res["failed"] += 1
-            res["errors"].append({"username": un, "error": str(e)})
+            res["failed"] += 1; res["errors"].append({"username": un, "error": str(e)})
     return res
 
 @app.post("/api/users/bulk-update-csv")
-async def bulk_update_csv(
-    payload: dict,
-    request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if cu.role not in ["Admin", "Helpdesk"]:
-        raise HTTPException(status_code=403)
+async def bulk_update_csv(payload: dict, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     rows = payload.get("rows", [])
-    if not rows:
-        return {"total": 0, "updated": 0, "failed": 0, "errors": []}
+    if not rows: return {"total": 0, "updated": 0, "failed": 0, "errors": []}
     column_map = {
-        "username": "username", "user": "username", "samaccountname": "username",
-        "firstname": "firstName", "first_name": "firstName", "givenname": "firstName",
-        "lastname": "lastName", "last_name": "lastName", "surname": "lastName", "sn": "lastName",
-        "displayname": "displayName", "display_name": "displayName",
-        "email": "email", "mail": "email",
-        "department": "department", "dept": "department",
-        "title": "title", "jobtitle": "title", "job_title": "title",
-        "company": "company",
-        "office": "office",
-        "phone": "phone", "telephone": "phone",
-        "description": "description",
-        "manager": "manager",
+        "username":"username","user":"username","samaccountname":"username",
+        "firstname":"firstName","first_name":"firstName","givenname":"firstName",
+        "lastname":"lastName","last_name":"lastName","surname":"lastName","sn":"lastName",
+        "displayname":"displayName","display_name":"displayName",
+        "email":"email","mail":"email",
+        "department":"department","dept":"department",
+        "title":"title","jobtitle":"title","job_title":"title",
+        "company":"company","office":"office",
+        "phone":"phone","telephone":"phone",
+        "description":"description","manager":"manager",
+        "homedirectory":"homeDirectory","home_directory":"homeDirectory","homedir":"homeDirectory","homefolder":"homeDirectory",
+        "homedrive":"homeDrive","home_drive":"homeDrive","drive":"homeDrive",
     }
     res = {"total": len(rows), "updated": 0, "failed": 0, "errors": [], "success": []}
     for idx, row in enumerate(rows, 1):
         normalized = {}
         for key, val in row.items():
             k = str(key).strip().lower().replace(" ", "").replace("-", "")
-            if k in column_map:
-                normalized[column_map[k]] = val
+            if k in column_map: normalized[column_map[k]] = val
         username = str(normalized.pop("username", "")).strip()
         if not username:
             res["failed"] += 1
             res["errors"].append({"row": idx, "username": "", "error": "Missing username"})
             continue
-        # Only send fields that have actual values — skip empty
         update_data = {k: v for k, v in normalized.items() if v and str(v).strip()}
         if not update_data:
             res["failed"] += 1
@@ -1977,143 +327,90 @@ async def bulk_update_csv(
         try:
             s, m = ad_service.update_user(username, update_data)
             if s:
-                res["updated"] += 1
-                res["success"].append(username)
+                res["updated"] += 1; res["success"].append(username)
                 log_action(db, cu.username, cu.role, "Bulk Update User", "User",
-                           username, f"Fields: {list(update_data.keys())}",
-                           "Success", get_client_ip(request))
+                    username, f"Fields: {list(update_data.keys())}", "Success", get_client_ip(request))
             else:
-                res["failed"] += 1
-                res["errors"].append({"row": idx, "username": username, "error": m})
+                res["failed"] += 1; res["errors"].append({"row": idx, "username": username, "error": m})
         except Exception as e:
-            res["failed"] += 1
-            res["errors"].append({"row": idx, "username": username, "error": str(e)})
+            res["failed"] += 1; res["errors"].append({"row": idx, "username": username, "error": str(e)})
     return res
 
 @app.post("/api/users/bulk-move")
-async def bulk_move(
-    payload: dict,
-    request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if cu.role not in ["Admin", "Helpdesk"]:
-        raise HTTPException(status_code=403)
-    uns = payload.get("usernames", [])
-    tou = payload.get("target_ou", "").strip()
+async def bulk_move(payload: dict, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
+    uns = payload.get("usernames", []); tou = payload.get("target_ou", "").strip()
     if not uns or not tou: raise HTTPException(status_code=400)
     res = {"total": len(uns), "moved": 0, "failed": 0, "errors": [], "success": []}
     for un in uns:
         try:
             s, m = ad_service.move_user(un, tou)
-            if s:
-                res["moved"] += 1
-                res["success"].append(un)
-            else:
-                res["failed"] += 1
-                res["errors"].append({"username": un, "error": m})
+            if s: res["moved"] += 1; res["success"].append(un)
+            else: res["failed"] += 1; res["errors"].append({"username": un, "error": m})
         except Exception as e:
-            res["failed"] += 1
-            res["errors"].append({"username": un, "error": str(e)})
+            res["failed"] += 1; res["errors"].append({"username": un, "error": str(e)})
     return res
 
 @app.post("/api/users/bulk-action")
-async def bulk_action(
-    payload: dict,
-    request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if cu.role not in ["Admin", "Helpdesk"]:
-        raise HTTPException(status_code=403)
-    uns = payload.get("usernames", [])
-    act = payload.get("action", "").lower()
-    ext = payload.get("extra", {})
-    if act == "delete" and cu.role != "Admin":
-        raise HTTPException(status_code=403)
+async def bulk_action(payload: dict, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
+    uns = payload.get("usernames", []); act = payload.get("action", "").lower(); ext = payload.get("extra", {})
+    if act == "delete" and cu.role != "Admin": raise HTTPException(status_code=403)
     res = {"total": len(uns), "success_count": 0, "failed": 0, "errors": [], "success": []}
     for un in uns:
         try:
             s, m = False, "Unknown"
-            if act == "enable":          s, m = ad_service.enable_user(un)
-            elif act == "disable":       s, m = ad_service.disable_user(un)
-            elif act == "unlock":        s, m = ad_service.unlock_user(un)
-            elif act == "delete":        s, m = ad_service.delete_user(un)
+            if act == "enable": s, m = ad_service.enable_user(un)
+            elif act == "disable": s, m = ad_service.disable_user(un)
+            elif act == "unlock": s, m = ad_service.unlock_user(un)
+            elif act == "delete": s, m = ad_service.delete_user(un)
             elif act == "reset-password":
                 p = ext.get("password", "")
-                if p and len(p) >= 8:
-                    s, m = ad_service.reset_password(un, p, ext.get("forceChange", True))
-                else:
-                    s, m = False, "Password too short"
-            if s:
-                res["success_count"] += 1
-                res["success"].append(un)
-                log_action(db, cu.username, cu.role, f"Bulk {act.title()}", "User",
-                           un, m, "Success", get_client_ip(request))
-            else:
-                res["failed"] += 1
-                res["errors"].append({"username": un, "error": m})
+                if p and len(p) >= 8: s, m = ad_service.reset_password(un, p, ext.get("forceChange", True))
+                else: s, m = False, "Password too short"
+            if s: res["success_count"] += 1; res["success"].append(un)
+            else: res["failed"] += 1; res["errors"].append({"username": un, "error": m})
         except Exception as e:
-            res["failed"] += 1
-            res["errors"].append({"username": un, "error": str(e)})
+            res["failed"] += 1; res["errors"].append({"username": un, "error": str(e)})
     return res
 
 @app.post("/api/users/{username}/disable")
-async def disable_user(
-    username: str, request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def disable_user(username: str, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     s, m = ad_service.disable_user(username)
-    log_action(db, cu.username, cu.role, "User Disabled", "User",
-               username, m, "Success" if s else "Failed", get_client_ip(request))
+    log_action(db, cu.username, cu.role, "User Disabled", "User", username, m, "Success" if s else "Failed", get_client_ip(request))
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
 @app.post("/api/users/{username}/enable")
-async def enable_user(
-    username: str, request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def enable_user(username: str, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     s, m = ad_service.enable_user(username)
-    log_action(db, cu.username, cu.role, "User Enabled", "User",
-               username, m, "Success" if s else "Failed", get_client_ip(request))
+    log_action(db, cu.username, cu.role, "User Enabled", "User", username, m, "Success" if s else "Failed", get_client_ip(request))
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
 @app.post("/api/users/{username}/unlock")
-async def unlock_user(
-    username: str, request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def unlock_user(username: str, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     s, m = ad_service.unlock_user(username)
-    log_action(db, cu.username, cu.role, "Unlock", "User",
-               username, m, "Success" if s else "Failed", get_client_ip(request))
+    log_action(db, cu.username, cu.role, "Unlock", "User", username, m, "Success" if s else "Failed", get_client_ip(request))
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
 @app.post("/api/users/{username}/reset-password")
-async def reset_pw(
-    username: str, payload: dict, request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def reset_pw(username: str, payload: dict, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     p = payload.get("password", "")
-    if not p or len(p) < 8:
-        raise HTTPException(status_code=400, detail="Password too short")
+    if not p or len(p) < 8: raise HTTPException(status_code=400, detail="Password too short")
     s, m = ad_service.reset_password(username, p, payload.get("forceChange", True))
-    log_action(db, cu.username, cu.role, "Password Reset", "User",
-               username, m, "Success" if s else "Failed", get_client_ip(request))
+    log_action(db, cu.username, cu.role, "Password Reset", "User", username, m, "Success" if s else "Failed", get_client_ip(request))
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
-# ═══ Photos ══════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# PHOTOS
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/users/{username}/photo")
 async def get_user_photo(username: str):
     p = ad_service.get_user_photo(username)
@@ -2121,62 +418,43 @@ async def get_user_photo(username: str):
     return Response(content=p, media_type="image/jpeg")
 
 @app.post("/api/users/{username}/photo")
-async def upload_user_photo(
-    username: str,
-    file: UploadFile = File(...),
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def upload_user_photo(username: str, file: UploadFile = File(...), cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     c = await file.read()
-    if len(c) > 100000:
-        raise HTTPException(status_code=400, detail="Photo too large (max 100KB)")
+    if len(c) > 100000: raise HTTPException(status_code=400, detail="Photo too large")
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Must be image")
     s, m = ad_service.set_user_photo(username, c)
-    log_action(db, cu.username, cu.role, "Photo Updated", "User", username, m,
-               "Success" if s else "Failed", "")
+    log_action(db, cu.username, cu.role, "Photo Updated", "User", username, m, "Success" if s else "Failed", "")
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
 @app.delete("/api/users/{username}/photo")
-async def delete_user_photo_route(
-    username: str,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def delete_user_photo_route(username: str, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     s, m = ad_service.delete_user_photo(username)
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
-# ═══ Groups ══════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# GROUPS
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/groups")
-async def get_groups(
-    search: Optional[str] = None,
-    show_builtin: Optional[bool] = None,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def get_groups(search: Optional[str] = None, show_builtin: Optional[bool] = None,
+    cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if show_builtin is None:
         show_builtin = get_setting(db, "show_builtin_groups", "false").lower() == "true"
     g = ad_service.get_groups(search=search, show_builtin=show_builtin)
     return {"groups": g, "count": len(g), "domain": config.AD_DOMAIN, "showBuiltin": show_builtin}
 
 @app.post("/api/groups")
-async def create_group(
-    payload: dict, request: Request,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def create_group(payload: dict, request: Request, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     n = payload.get("name", "").strip()
     if not n: raise HTTPException(status_code=400, detail="Name required")
     ou = payload.get("ou") or ad_service.base_dn
-    s, m = ad_service.create_group(
-        n, payload.get("description", ""), ou,
-        payload.get("type", "security"), payload.get("scope", "global")
-    )
+    s, m = ad_service.create_group(n, payload.get("description", ""), ou,
+        payload.get("type", "security"), payload.get("scope", "global"))
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
@@ -2193,31 +471,24 @@ async def group_members(group_name: str, cu: AppUser = Depends(get_current_user)
     return {"members": m, "count": len(m), "group": group_name}
 
 @app.post("/api/groups/{group_name}/members/{username}")
-async def add_member(
-    group_name: str, username: str,
-    cu: AppUser = Depends(get_current_user)
-):
+async def add_member(group_name: str, username: str, cu: AppUser = Depends(get_current_user)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     s, m = ad_service.add_to_group(username, group_name)
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
 @app.delete("/api/groups/{group_name}/members/{username}")
-async def remove_member(
-    group_name: str, username: str,
-    cu: AppUser = Depends(get_current_user)
-):
+async def remove_member(group_name: str, username: str, cu: AppUser = Depends(get_current_user)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     s, m = ad_service.remove_from_group(username, group_name)
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
-# ═══ Computers ═══════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# COMPUTERS
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/computers")
-async def get_computers(
-    search: Optional[str] = None,
-    cu: AppUser = Depends(get_current_user)
-):
+async def get_computers(search: Optional[str] = None, cu: AppUser = Depends(get_current_user)):
     c = ad_service.get_computers(search=search)
     return {"computers": c, "count": len(c), "domain": config.AD_DOMAIN}
 
@@ -2251,10 +522,7 @@ async def disable_computer(name: str, cu: AppUser = Depends(get_current_user)):
     return {"success": True, "message": m}
 
 @app.post("/api/computers/{name}/move")
-async def move_computer(
-    name: str, payload: dict,
-    cu: AppUser = Depends(get_current_user)
-):
+async def move_computer(name: str, payload: dict, cu: AppUser = Depends(get_current_user)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     tou = payload.get("target_ou", "").strip()
     if not tou: raise HTTPException(status_code=400)
@@ -2262,7 +530,9 @@ async def move_computer(
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
-# ═══ OUs ═════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# OUs
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/ous")
 async def get_ous(cu: AppUser = Depends(get_current_user)):
     ous = ad_service.get_ou_tree()
@@ -2273,10 +543,7 @@ async def create_ou(payload: dict, cu: AppUser = Depends(get_current_user)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     n = payload.get("name", "").strip()
     if not n: raise HTTPException(status_code=400)
-    s, m = ad_service.create_ou(
-        n, payload.get("parent") or ad_service.base_dn,
-        payload.get("description", "")
-    )
+    s, m = ad_service.create_ou(n, payload.get("parent") or ad_service.base_dn, payload.get("description", ""))
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
 
@@ -2298,7 +565,9 @@ async def delete_ou(dn: str, cu: AppUser = Depends(require_admin)):
 async def ou_contents(dn: str, cu: AppUser = Depends(get_current_user)):
     return ad_service.get_ou_contents(dn)
 
-# ═══ GPOs ════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# GPOs
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/gpos")
 async def get_gpos(cu: AppUser = Depends(get_current_user)):
     try:
@@ -2306,130 +575,77 @@ async def get_gpos(cu: AppUser = Depends(get_current_user)):
         return {"gpos": g, "count": len(g), "domain": config.AD_DOMAIN}
     except HTTPException: raise
     except Exception as e:
-        logger.error(f"GPO fetch error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch GPOs: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed: {str(e)}")
 
 @app.get("/api/gpos/links")
 async def get_gpo_links(cu: AppUser = Depends(get_current_user)):
     l = ad_service.get_gpo_links()
     return {"links": l, "count": len(l)}
 
-# ═══ Sessions ════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# SESSIONS
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/sessions")
-async def get_active_sessions(
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def get_active_sessions(cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     co = datetime.utcnow() - timedelta(hours=8)
-    db.query(ActiveSession).filter(ActiveSession.last_activity < co).delete()
-    db.commit()
+    db.query(ActiveSession).filter(ActiveSession.last_activity < co).delete(); db.commit()
     ss = db.query(ActiveSession).order_by(ActiveSession.last_activity.desc()).all()
-    return {
-        "sessions": [{
-            "id":           s.id,
-            "username":     s.username,
-            "displayName":  s.display_name,
-            "role":         s.role,
-            "ipAddress":    s.ip_address,
-            "userAgent":    s.user_agent,
-            "loginTime":    s.login_time.isoformat() if s.login_time else None,
-            "lastActivity": s.last_activity.isoformat() if s.last_activity else None,
-            "isCurrent":    False,
-        } for s in ss],
-        "count": len(ss)
-    }
+    return {"sessions": [{"id": s.id, "username": s.username, "displayName": s.display_name,
+        "role": s.role, "ipAddress": s.ip_address, "userAgent": s.user_agent,
+        "loginTime": s.login_time.isoformat() if s.login_time else None,
+        "lastActivity": s.last_activity.isoformat() if s.last_activity else None,
+        "isCurrent": False} for s in ss], "count": len(ss)}
 
 @app.delete("/api/sessions/{session_id}")
-async def terminate_session(
-    session_id: int,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def terminate_session(session_id: int, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     s = db.query(ActiveSession).filter(ActiveSession.id == session_id).first()
     if not s: raise HTTPException(status_code=404)
-    un = s.username
-    db.delete(s)
-    db.commit()
-    log_action(db, cu.username, cu.role, "Session Terminated", "Session",
-               un, "Forced logout", "Success", "")
+    un = s.username; db.delete(s); db.commit()
+    log_action(db, cu.username, cu.role, "Session Terminated", "Session", un, "Forced logout", "Success", "")
     return {"success": True, "message": f"Session for {un} terminated"}
-    # ═══ Service Accounts ════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════
+# SERVICE ACCOUNTS
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/service-accounts")
-async def list_service_accounts(
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def list_service_accounts(cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     aa = db.query(ServiceAccount).order_by(ServiceAccount.created_at.desc()).all()
-    return {
-        "accounts": [{
-            "id":                  a.id,
-            "username":            a.username,
-            "displayName":         a.display_name,
-            "email":               a.email,
-            "description":         a.description,
-            "purpose":             a.purpose,
-            "owner":               a.owner,
-            "department":          a.department,
-            "ou":                  a.ou,
-            "adDn":                a.ad_dn,
-            "passwordNeverExpires":a.password_never_expires,
-            "cannotChangePassword":a.cannot_change_password,
-            "isSystemCritical":    a.is_system_critical,
-            "hasAppAccess":        a.has_app_access,
-            "appRole":             a.app_role,
-            "createdAt":           a.created_at.isoformat() if a.created_at else None,
-            "createdBy":           a.created_by,
-            "lastPasswordChange":  a.last_password_change.isoformat() if a.last_password_change else None,
-            "notes":               a.notes,
-        } for a in aa],
-        "count": len(aa)
-    }
+    return {"accounts": [{"id": a.id, "username": a.username, "displayName": a.display_name,
+        "email": a.email, "description": a.description, "purpose": a.purpose,
+        "owner": a.owner, "department": a.department, "ou": a.ou, "adDn": a.ad_dn,
+        "passwordNeverExpires": a.password_never_expires, "cannotChangePassword": a.cannot_change_password,
+        "isSystemCritical": a.is_system_critical, "hasAppAccess": a.has_app_access,
+        "appRole": a.app_role, "createdAt": a.created_at.isoformat() if a.created_at else None,
+        "createdBy": a.created_by,
+        "lastPasswordChange": a.last_password_change.isoformat() if a.last_password_change else None,
+        "notes": a.notes} for a in aa], "count": len(aa)}
 
 @app.post("/api/service-accounts")
-async def create_service_account(
-    payload: dict, request: Request,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def create_service_account(payload: dict, request: Request, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     un = payload.get("username", "").strip()
     pw = payload.get("password", "")
     dn = payload.get("displayName", "").strip() or f"Service: {un}"
-    if not un:
-        raise HTTPException(status_code=400, detail="Username required")
-    if not pw or len(pw) < 12:
-        raise HTTPException(status_code=400, detail="Password must be 12+ chars")
+    if not un: raise HTTPException(status_code=400, detail="Username required")
+    if not pw or len(pw) < 12: raise HTTPException(status_code=400, detail="Password must be 12+ chars")
     if db.query(ServiceAccount).filter(ServiceAccount.username == un).first():
         raise HTTPException(status_code=400, detail=f"'{un}' already exists")
-    ip  = get_client_ip(request)
-    ou  = payload.get("ou") or ad_service.target_ou
-    ad_data = {
-        "username":            un,
-        "displayName":         dn,
-        "firstName":           "Service",
-        "lastName":            un,
-        "email":               payload.get("email") or f"{un}@{ad_service.domain}",
-        "description":         payload.get("description") or payload.get("purpose"),
-        "department":          payload.get("department") or "Service Accounts",
-        "title":               "Service Account",
-        "company":             payload.get("department"),
-        "password":            pw,
-        "ou":                  ou,
-        "passwordNeverExpires":payload.get("passwordNeverExpires", True),
-        "mustChangePassword":  False,
-        "upn":                 f"{un}@{ad_service.domain}",
-    }
+    ip = get_client_ip(request); ou = payload.get("ou") or ad_service.target_ou
+    ad_data = {"username": un, "displayName": dn, "firstName": "Service", "lastName": un,
+        "email": payload.get("email") or f"{un}@{ad_service.domain}",
+        "description": payload.get("description") or payload.get("purpose"),
+        "department": payload.get("department") or "Service Accounts",
+        "title": "Service Account", "company": payload.get("department"),
+        "password": pw, "ou": ou, "passwordNeverExpires": payload.get("passwordNeverExpires", True),
+        "mustChangePassword": False, "upn": f"{un}@{ad_service.domain}"}
     s, m = ad_service.create_user(ad_data)
     if not s:
-        log_action(db, cu.username, cu.role, "Service Account Create Failed",
-                   "ServiceAccount", un, f"AD: {m}", "Failed", ip)
+        log_action(db, cu.username, cu.role, "Service Account Create Failed", "ServiceAccount", un, f"AD: {m}", "Failed", ip)
         raise HTTPException(status_code=500, detail=f"AD creation failed: {m}")
     adn = f"CN={dn},{ou}"
     try:
-        sa = ServiceAccount(
-            username=un, display_name=dn,
+        sa = ServiceAccount(username=un, display_name=dn,
             email=payload.get("email") or f"{un}@{ad_service.domain}",
-            description=payload.get("description", ""),
-            purpose=payload.get("purpose", ""),
+            description=payload.get("description", ""), purpose=payload.get("purpose", ""),
             owner=payload.get("owner") or cu.username,
             department=payload.get("department") or "Service Accounts",
             ou=ou, ad_dn=adn,
@@ -2438,167 +654,109 @@ async def create_service_account(
             is_system_critical=payload.get("isSystemCritical", False),
             has_app_access=payload.get("hasAppAccess", False),
             app_role=payload.get("appRole", "Viewer"),
-            created_by=cu.username,
-            last_password_change=datetime.utcnow(),
-            notes=payload.get("notes", "")
-        )
+            created_by=cu.username, last_password_change=datetime.utcnow(),
+            notes=payload.get("notes", ""))
         db.add(sa)
         if payload.get("hasAppAccess"):
             ex = db.query(AppUser).filter(AppUser.username == un).first()
-            if not ex:
-                db.add(AppUser(
-                    username=un, display_name=dn,
-                    email=payload.get("email") or f"{un}@{ad_service.domain}",
-                    role=payload.get("appRole", "Viewer"), active=True
-                ))
+            if not ex: db.add(AppUser(username=un, display_name=dn,
+                email=payload.get("email") or f"{un}@{ad_service.domain}",
+                role=payload.get("appRole", "Viewer"), active=True))
         db.commit()
-        log_action(db, cu.username, cu.role, "Service Account Created",
-                   "ServiceAccount", un,
-                   f"Created. AppAccess: {payload.get('hasAppAccess', False)}",
-                   "Success", ip)
-        return {"success": True, "message": f"Service account '{un}' created",
-                "id": sa.id, "adDn": adn}
+        log_action(db, cu.username, cu.role, "Service Account Created", "ServiceAccount", un,
+            f"Created. AppAccess: {payload.get('hasAppAccess', False)}", "Success", ip)
+        return {"success": True, "message": f"Service account '{un}' created", "id": sa.id, "adDn": adn}
     except Exception as e:
         try: ad_service.delete_user(un)
         except: pass
         raise HTTPException(status_code=500, detail=f"DB save failed: {str(e)}")
 
 @app.get("/api/service-accounts/{aid}")
-async def get_service_account(
-    aid: int,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def get_service_account(aid: int, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     sa = db.query(ServiceAccount).filter(ServiceAccount.id == aid).first()
     if not sa: raise HTTPException(status_code=404)
     ai = ad_service.get_user(sa.username)
-    return {
-        "id": sa.id, "username": sa.username, "displayName": sa.display_name,
-        "email": sa.email, "description": sa.description, "purpose": sa.purpose,
-        "owner": sa.owner, "department": sa.department, "ou": sa.ou, "adDn": sa.ad_dn,
+    return {"id": sa.id, "username": sa.username, "displayName": sa.display_name, "email": sa.email,
+        "description": sa.description, "purpose": sa.purpose, "owner": sa.owner,
+        "department": sa.department, "ou": sa.ou, "adDn": sa.ad_dn,
         "passwordNeverExpires": sa.password_never_expires,
         "cannotChangePassword": sa.cannot_change_password,
-        "isSystemCritical": sa.is_system_critical,
-        "hasAppAccess": sa.has_app_access, "appRole": sa.app_role,
+        "isSystemCritical": sa.is_system_critical, "hasAppAccess": sa.has_app_access,
+        "appRole": sa.app_role,
         "createdAt": sa.created_at.isoformat() if sa.created_at else None,
         "createdBy": sa.created_by,
         "lastPasswordChange": sa.last_password_change.isoformat() if sa.last_password_change else None,
-        "notes": sa.notes,
-        "adStatus": ai if ai else {"error": "Not found in AD"}
-    }
+        "notes": sa.notes, "adStatus": ai if ai else {"error": "Not found in AD"}}
 
 @app.put("/api/service-accounts/{aid}")
-async def update_service_account(
-    aid: int, payload: dict, request: Request,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def update_service_account(aid: int, payload: dict, request: Request, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     sa = db.query(ServiceAccount).filter(ServiceAccount.id == aid).first()
     if not sa: raise HTTPException(status_code=404)
     oaa = sa.has_app_access
-    field_map = {
-        "displayName": "display_name", "email": "email",
-        "description": "description",  "purpose": "purpose",
-        "owner": "owner", "department": "department", "notes": "notes"
-    }
-    for k, db_k in field_map.items():
-        if k in payload:
-            setattr(sa, db_k, payload[k])
+    fm = {"displayName": "display_name", "email": "email", "description": "description",
+        "purpose": "purpose", "owner": "owner", "department": "department", "notes": "notes"}
+    for k, db_k in fm.items():
+        if k in payload: setattr(sa, db_k, payload[k])
     if "isSystemCritical" in payload: sa.is_system_critical = payload["isSystemCritical"]
-    if "hasAppAccess"     in payload: sa.has_app_access     = payload["hasAppAccess"]
-    if "appRole"          in payload: sa.app_role           = payload["appRole"]
-    # Sync selected fields to AD
+    if "hasAppAccess" in payload: sa.has_app_access = payload["hasAppAccess"]
+    if "appRole" in payload: sa.app_role = payload["appRole"]
     ac = {}
-    for fk, ak in {
-        "displayName": "displayName", "email": "email",
-        "description": "description", "department": "department"
-    }.items():
+    for fk, ak in {"displayName":"displayName","email":"email","description":"description","department":"department"}.items():
         if fk in payload: ac[ak] = payload[fk]
     if ac: ad_service.update_user(sa.username, ac)
-    # Handle app access changes
     if sa.has_app_access and not oaa:
         ex = db.query(AppUser).filter(AppUser.username == sa.username).first()
-        if not ex:
-            db.add(AppUser(
-                username=sa.username, display_name=sa.display_name,
-                email=sa.email, role=sa.app_role, active=True
-            ))
+        if not ex: db.add(AppUser(username=sa.username, display_name=sa.display_name,
+            email=sa.email, role=sa.app_role, active=True))
     elif not sa.has_app_access and oaa:
         db.query(AppUser).filter(AppUser.username == sa.username).delete()
     elif sa.has_app_access and "appRole" in payload:
         au = db.query(AppUser).filter(AppUser.username == sa.username).first()
         if au: au.role = payload["appRole"]
     db.commit()
-    log_action(db, cu.username, cu.role, "Service Account Updated",
-               "ServiceAccount", sa.username, "Updated", "Success",
-               get_client_ip(request))
+    log_action(db, cu.username, cu.role, "Service Account Updated", "ServiceAccount", sa.username, "Updated", "Success", get_client_ip(request))
     return {"success": True, "message": "Updated"}
 
 @app.post("/api/service-accounts/{aid}/reset-password")
-async def reset_service_password(
-    aid: int, payload: dict, request: Request,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def reset_service_password(aid: int, payload: dict, request: Request, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     sa = db.query(ServiceAccount).filter(ServiceAccount.id == aid).first()
     if not sa: raise HTTPException(status_code=404)
     np = payload.get("password", "")
-    if not np or len(np) < 12:
-        raise HTTPException(status_code=400, detail="Password must be 12+ chars")
+    if not np or len(np) < 12: raise HTTPException(status_code=400, detail="Password must be 12+ chars")
     s, m = ad_service.reset_password(sa.username, np, force_change=False)
     if not s:
-        log_action(db, cu.username, cu.role, "Service Pwd Reset Failed",
-                   "ServiceAccount", sa.username, m, "Failed", get_client_ip(request))
+        log_action(db, cu.username, cu.role, "Service Pwd Reset Failed", "ServiceAccount", sa.username, m, "Failed", get_client_ip(request))
         raise HTTPException(status_code=500, detail=m)
-    sa.last_password_change = datetime.utcnow()
-    db.commit()
-    log_action(db, cu.username, cu.role, "Service Pwd Reset",
-               "ServiceAccount", sa.username, "Reset", "Success",
-               get_client_ip(request))
+    sa.last_password_change = datetime.utcnow(); db.commit()
+    log_action(db, cu.username, cu.role, "Service Pwd Reset", "ServiceAccount", sa.username, "Reset", "Success", get_client_ip(request))
     return {"success": True, "message": f"Password reset for {sa.username}"}
 
 @app.delete("/api/service-accounts/{aid}")
-async def delete_service_account(
-    aid: int, request: Request,
-    delete_ad: bool = True,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def delete_service_account(aid: int, request: Request, delete_ad: bool = True, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     sa = db.query(ServiceAccount).filter(ServiceAccount.id == aid).first()
     if not sa: raise HTTPException(status_code=404)
-    if sa.is_system_critical:
-        raise HTTPException(status_code=400, detail="Cannot delete system critical account")
-    ip  = get_client_ip(request)
-    un  = sa.username
-    am  = "AD deletion skipped"
-    aok = True
+    if sa.is_system_critical: raise HTTPException(status_code=400, detail="Cannot delete system critical account")
+    ip = get_client_ip(request); un = sa.username
+    am = "AD deletion skipped"; aok = True
     if delete_ad:
         aok, am = ad_service.delete_user(un)
         if not aok:
-            log_action(db, cu.username, cu.role, "Service Account Delete Failed",
-                       "ServiceAccount", un, f"AD: {am}", "Failed", ip)
+            log_action(db, cu.username, cu.role, "Service Account Delete Failed", "ServiceAccount", un, f"AD: {am}", "Failed", ip)
             raise HTTPException(status_code=500, detail=f"Could not delete from AD: {am}")
     db.query(AppUser).filter(AppUser.username == un).delete()
-    db.delete(sa)
-    db.commit()
-    log_action(db, cu.username, cu.role, "Service Account Deleted",
-               "ServiceAccount", un, f"AD: {am}", "Success", ip)
+    db.delete(sa); db.commit()
+    log_action(db, cu.username, cu.role, "Service Account Deleted", "ServiceAccount", un, f"AD: {am}", "Success", ip)
     return {"success": True, "message": f"Service account '{un}' deleted"}
 
 @app.post("/api/service-accounts/import-existing")
-async def import_service_account(
-    payload: dict, request: Request,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def import_service_account(payload: dict, request: Request, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     un = payload.get("username", "").strip()
     if not un: raise HTTPException(status_code=400, detail="Username required")
     ai = ad_service.get_user(un)
     if not ai: raise HTTPException(status_code=404, detail=f"User '{un}' not found in AD")
     if db.query(ServiceAccount).filter(ServiceAccount.username == un).first():
         raise HTTPException(status_code=400, detail="Already imported")
-    sa = ServiceAccount(
-        username=un, display_name=ai.get("display_name", un),
+    sa = ServiceAccount(username=un, display_name=ai.get("display_name", un),
         email=ai.get("email", ""), description=payload.get("description", ""),
         purpose=payload.get("purpose", ""),
         owner=payload.get("owner") or cu.username,
@@ -2609,107 +767,73 @@ async def import_service_account(
         is_system_critical=payload.get("isSystemCritical", False),
         has_app_access=payload.get("hasAppAccess", False),
         app_role=payload.get("appRole", "Viewer"),
-        created_by=cu.username,
-        notes=payload.get("notes", "Imported from AD")
-    )
+        created_by=cu.username, notes=payload.get("notes", "Imported from AD"))
     db.add(sa)
     if payload.get("hasAppAccess"):
         ex = db.query(AppUser).filter(AppUser.username == un).first()
-        if not ex:
-            db.add(AppUser(
-                username=un, display_name=ai.get("display_name", un),
-                email=ai.get("email", ""),
-                role=payload.get("appRole", "Viewer"), active=True
-            ))
+        if not ex: db.add(AppUser(username=un, display_name=ai.get("display_name", un),
+            email=ai.get("email", ""), role=payload.get("appRole", "Viewer"), active=True))
     db.commit()
-    log_action(db, cu.username, cu.role, "Service Account Imported",
-               "ServiceAccount", un, "Imported", "Success", get_client_ip(request))
+    log_action(db, cu.username, cu.role, "Service Account Imported", "ServiceAccount", un, "Imported", "Success", get_client_ip(request))
     return {"success": True, "message": f"Imported '{un}'", "id": sa.id}
 
-# ═══ Templates ═══════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# TEMPLATES
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/templates")
-async def list_templates(
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def list_templates(cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     tt = db.query(UserTemplate).all()
-    return {
-        "templates": [{
-            "id": t.id, "name": t.name, "description": t.description,
-            "ou": t.ou, "department": t.department, "title": t.title,
-            "company": t.company, "office": t.office, "phone": t.phone,
-            "manager": t.manager, "groups": t.groups,
-            "passwordNeverExpires": t.password_never_expires,
-            "mustChangePassword":   t.must_change_password,
-            "enabled":   t.enabled,
-            "createdAt": t.created_at.isoformat() if t.created_at else None,
-            "createdBy": t.created_by,
-        } for t in tt],
-        "count": len(tt)
-    }
+    return {"templates": [{"id": t.id, "name": t.name, "description": t.description,
+        "ou": t.ou, "department": t.department, "title": t.title,
+        "company": t.company, "office": t.office, "phone": t.phone,
+        "manager": t.manager, "groups": t.groups,
+        "passwordNeverExpires": t.password_never_expires,
+        "mustChangePassword": t.must_change_password,
+        "enabled": t.enabled,
+        "createdAt": t.created_at.isoformat() if t.created_at else None,
+        "createdBy": t.created_by} for t in tt], "count": len(tt)}
 
 @app.post("/api/templates")
-async def create_template(
-    payload: dict,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def create_template(payload: dict, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     n = payload.get("name", "").strip()
     if not n: raise HTTPException(status_code=400)
     if db.query(UserTemplate).filter(UserTemplate.name == n).first():
         raise HTTPException(status_code=400, detail="Exists")
     g = payload.get("groups", [])
     if isinstance(g, list): g = json.dumps(g)
-    t = UserTemplate(
-        name=n, description=payload.get("description", ""),
+    t = UserTemplate(name=n, description=payload.get("description", ""),
         ou=payload.get("ou", ""), department=payload.get("department", ""),
         title=payload.get("title", ""), company=payload.get("company", ""),
         office=payload.get("office", ""), phone=payload.get("phone", ""),
         manager=payload.get("manager", ""), groups=g,
         password_never_expires=payload.get("passwordNeverExpires", False),
         must_change_password=payload.get("mustChangePassword", True),
-        enabled=payload.get("enabled", True), created_by=cu.username
-    )
-    db.add(t)
-    db.commit()
+        enabled=payload.get("enabled", True), created_by=cu.username)
+    db.add(t); db.commit()
     return {"success": True, "id": t.id}
 
 @app.delete("/api/templates/{tid}")
-async def delete_template(
-    tid: int,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def delete_template(tid: int, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     t = db.query(UserTemplate).filter(UserTemplate.id == tid).first()
     if not t: raise HTTPException(status_code=404)
-    db.delete(t)
-    db.commit()
+    db.delete(t); db.commit()
     return {"success": True}
 
 @app.post("/api/templates/{tid}/create-user")
-async def create_user_from_template(
-    tid: int, payload: dict,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def create_user_from_template(tid: int, payload: dict, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if cu.role not in ["Admin", "Helpdesk"]: raise HTTPException(status_code=403)
     t = db.query(UserTemplate).filter(UserTemplate.id == tid).first()
     if not t: raise HTTPException(status_code=404)
-    ud = {
-        "username":    payload.get("username", "").strip(),
-        "firstName":   payload.get("firstName", "").strip(),
-        "lastName":    payload.get("lastName", "").strip(),
+    ud = {"username": payload.get("username", "").strip(),
+        "firstName": payload.get("firstName", "").strip(),
+        "lastName": payload.get("lastName", "").strip(),
         "displayName": (payload.get("displayName", "")
-                        or f"{payload.get('firstName','')} {payload.get('lastName','')}".strip()),
-        "email":       payload.get("email", ""),
-        "password":    payload.get("password", ""),
-        "ou":          t.ou or ad_service.target_ou,
-        "department":  t.department, "title":   t.title,
-        "company":     t.company,    "office":  t.office,
-        "phone":       t.phone,      "manager": t.manager,
+            or f"{payload.get('firstName','')} {payload.get('lastName','')}".strip()),
+        "email": payload.get("email", ""), "password": payload.get("password", ""),
+        "ou": t.ou or ad_service.target_ou, "department": t.department, "title": t.title,
+        "company": t.company, "office": t.office, "phone": t.phone, "manager": t.manager,
         "passwordNeverExpires": t.password_never_expires,
-        "mustChangePassword":   t.must_change_password,
-    }
+        "mustChangePassword": t.must_change_password}
     if not ud["username"] or not ud["password"]:
         raise HTTPException(status_code=400, detail="username and password required")
     s, m = ad_service.create_user(ud)
@@ -2723,216 +847,130 @@ async def create_user_from_template(
         except: pass
     return {"success": True, "message": m}
 
-# ═══ Workflows ═══════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# WORKFLOWS
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/workflows/requests")
-async def list_workflow_requests(
-    status_filter: Optional[str] = None,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def list_workflow_requests(status_filter: Optional[str] = None, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(WorkflowRequest).order_by(WorkflowRequest.created_at.desc())
-    if cu.role != "Admin":
-        q = q.filter(WorkflowRequest.requested_by == cu.username)
-    if status_filter:
-        q = q.filter(WorkflowRequest.status == status_filter)
+    if cu.role != "Admin": q = q.filter(WorkflowRequest.requested_by == cu.username)
+    if status_filter: q = q.filter(WorkflowRequest.status == status_filter)
     rr = q.all()
-    return {
-        "requests": [{
-            "id":             r.id,
-            "type":           r.request_type,
-            "requestedBy":    r.requested_by,
-            "target":         r.target_object,
-            "status":         r.status,
-            "reason":         r.reason,
-            "rejectionReason":r.rejection_reason,
-            "approvedBy":     r.approved_by,
-            "approvedAt":     r.approved_at.isoformat() if r.approved_at else None,
-            "completedAt":    r.completed_at.isoformat() if r.completed_at else None,
-            "createdAt":      r.created_at.isoformat(),
-            "payload":        r.payload,
-        } for r in rr],
-        "count": len(rr)
-    }
+    return {"requests": [{"id": r.id, "type": r.request_type, "requestedBy": r.requested_by,
+        "target": r.target_object, "status": r.status, "reason": r.reason,
+        "rejectionReason": r.rejection_reason, "approvedBy": r.approved_by,
+        "approvedAt": r.approved_at.isoformat() if r.approved_at else None,
+        "completedAt": r.completed_at.isoformat() if r.completed_at else None,
+        "createdAt": r.created_at.isoformat(), "payload": r.payload} for r in rr], "count": len(rr)}
 
 @app.post("/api/workflows/requests")
-async def create_workflow_request(
-    payload: dict,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    r = WorkflowRequest(
-        request_type=payload.get("type", "modify-user"),
-        requested_by=cu.username,
-        target_object=payload.get("target", ""),
+async def create_workflow_request(payload: dict, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    r = WorkflowRequest(request_type=payload.get("type", "modify-user"),
+        requested_by=cu.username, target_object=payload.get("target", ""),
         payload=json.dumps(payload.get("changes", {})),
-        reason=payload.get("reason", ""),
-        status="pending"
-    )
-    db.add(r)
-    db.commit()
+        reason=payload.get("reason", ""), status="pending")
+    db.add(r); db.commit()
     return {"success": True, "id": r.id}
 
 @app.post("/api/workflows/requests/{rid}/approve")
-async def approve_request(
-    rid: int,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def approve_request(rid: int, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     r = db.query(WorkflowRequest).filter(WorkflowRequest.id == rid).first()
     if not r: raise HTTPException(status_code=404)
-    if r.status != "pending":
-        raise HTTPException(status_code=400, detail=f"Already {r.status}")
+    if r.status != "pending": raise HTTPException(status_code=400, detail=f"Already {r.status}")
     try:
-        p    = json.loads(r.payload) if r.payload else {}
+        p = json.loads(r.payload) if r.payload else {}
         s, m = False, ""
         if   r.request_type == "modify-user":    s, m = ad_service.update_user(r.target_object, p)
         elif r.request_type == "create-user":    s, m = ad_service.create_user(p)
         elif r.request_type == "delete-user":    s, m = ad_service.delete_user(r.target_object)
-        elif r.request_type == "reset-password": s, m = ad_service.reset_password(
-            r.target_object, p.get("password", ""), p.get("forceChange", True))
+        elif r.request_type == "reset-password": s, m = ad_service.reset_password(r.target_object, p.get("password", ""), p.get("forceChange", True))
         elif r.request_type == "disable-user":   s, m = ad_service.disable_user(r.target_object)
         elif r.request_type == "enable-user":    s, m = ad_service.enable_user(r.target_object)
-        r.status     = "completed" if s else "approved"
-        r.approved_by  = cu.username
-        r.approved_at  = datetime.utcnow()
+        r.status = "completed" if s else "approved"
+        r.approved_by = cu.username; r.approved_at = datetime.utcnow()
         if s: r.completed_at = datetime.utcnow()
         db.commit()
         return {"success": s, "message": m, "status": r.status}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/workflows/requests/{rid}/reject")
-async def reject_request(
-    rid: int, payload: dict,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def reject_request(rid: int, payload: dict, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     r = db.query(WorkflowRequest).filter(WorkflowRequest.id == rid).first()
     if not r: raise HTTPException(status_code=404)
-    r.status           = "rejected"
-    r.approved_by      = cu.username
-    r.approved_at      = datetime.utcnow()
-    r.rejection_reason = payload.get("reason", "")
-    db.commit()
+    r.status = "rejected"; r.approved_by = cu.username; r.approved_at = datetime.utcnow()
+    r.rejection_reason = payload.get("reason", ""); db.commit()
     return {"success": True}
 
-# ═══ Audit Logs ══════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# AUDIT LOGS
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/audit-logs")
-async def get_audit(
-    skip: int = 0, limit: int = 500,
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def get_audit(skip: int = 0, limit: int = 500, cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     ll = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).offset(skip).limit(limit).all()
-    return {
-        "logs": [{
-            "id":           l.id,
-            "timestamp":    l.timestamp.isoformat(),
-            "operator":     l.operator,
-            "operatorRole": l.operator_role,
-            "action":       l.action,
-            "objectType":   l.object_type,
-            "objectName":   l.object_name,
-            "details":      l.details,
-            "status":       l.status,
-            "ipAddress":    l.ip_address,
-        } for l in ll],
-        "count": len(ll),
-        "total": db.query(AuditLog).count()
-    }
+    return {"logs": [{"id": l.id, "timestamp": l.timestamp.isoformat(),
+        "operator": l.operator, "operatorRole": l.operator_role, "action": l.action,
+        "objectType": l.object_type, "objectName": l.object_name, "details": l.details,
+        "status": l.status, "ipAddress": l.ip_address} for l in ll],
+        "count": len(ll), "total": db.query(AuditLog).count()}
 
 @app.get("/api/audit-logs/export")
-async def export_audit(
-    cu: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def export_audit(cu: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
     ll  = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).all()
-    o   = io.StringIO()
-    w   = csv.writer(o)
+    o   = io.StringIO(); w = csv.writer(o)
     w.writerow(["Timestamp","Operator","Role","Action","Object Type","Object Name","Details","Status","IP"])
     for l in ll:
-        w.writerow([l.timestamp.isoformat(), l.operator, l.operator_role,
-                    l.action, l.object_type, l.object_name,
-                    l.details, l.status, l.ip_address])
+        w.writerow([l.timestamp.isoformat(), l.operator, l.operator_role, l.action,
+            l.object_type, l.object_name, l.details, l.status, l.ip_address])
     o.seek(0)
     return StreamingResponse(o, media_type="text/csv", headers={
-        "Content-Disposition": f"attachment; filename=audit-{datetime.now().strftime('%Y%m%d')}.csv"
-    })
+        "Content-Disposition": f"attachment; filename=audit-{datetime.now().strftime('%Y%m%d')}.csv"})
 
-# ═══ App Users ═══════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# APP USERS
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/app-users")
-async def list_app_users(
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def list_app_users(cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     uu = db.query(AppUser).all()
-    return {
-        "users": [{
-            "id":           u.id,
-            "username":     u.username,
-            "display_name": u.display_name,
-            "email":        u.email,
-            "role":         u.role,
-            "active":       u.active,
-            "last_login":   u.last_login.isoformat() if u.last_login else None,
-        } for u in uu],
-        "count": len(uu)
-    }
+    return {"users": [{"id": u.id, "username": u.username, "display_name": u.display_name,
+        "email": u.email, "role": u.role, "active": u.active,
+        "last_login": u.last_login.isoformat() if u.last_login else None} for u in uu], "count": len(uu)}
 
 @app.post("/api/app-users")
-async def create_app_user(
-    payload: dict,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def create_app_user(payload: dict, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     un = payload.get("username", "").strip()
     if not un: raise HTTPException(status_code=400)
     if payload.get("role") not in ["Admin", "Helpdesk", "Viewer"]:
         raise HTTPException(status_code=400, detail="Invalid role")
     if db.query(AppUser).filter(AppUser.username == un).first():
         raise HTTPException(status_code=400, detail="Exists")
-    db.add(AppUser(
-        username=un,
-        display_name=payload.get("display_name", ""),
-        email=payload.get("email", ""),
-        role=payload["role"],
-        active=True
-    ))
+    db.add(AppUser(username=un, display_name=payload.get("display_name", ""),
+        email=payload.get("email", ""), role=payload["role"], active=True))
     db.commit()
     return {"success": True}
 
 @app.delete("/api/app-users/{username}")
-async def delete_app_user(
-    username: str,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def delete_app_user(username: str, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     u = db.query(AppUser).filter(AppUser.username == username).first()
     if not u: raise HTTPException(status_code=404)
-    if u.username == cu.username:
-        raise HTTPException(status_code=400, detail="Cannot delete self")
-    db.delete(u)
-    db.commit()
+    if u.username == cu.username: raise HTTPException(status_code=400, detail="Cannot delete self")
+    db.delete(u); db.commit()
     return {"success": True}
 
-# ═══ Notifications ═══════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# NOTIFICATIONS
+# ═══════════════════════════════════════════════════════════
 @app.post("/api/notifications/test-email")
-async def test_email_route(
-    payload: dict,
-    cu: AppUser = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
+async def test_email_route(payload: dict, cu: AppUser = Depends(require_admin), db: Session = Depends(get_db)):
     to = payload.get("to", "").strip()
     if not to: raise HTTPException(status_code=400)
-    s, m = send_email(
-        to, "AD Manager Pro - Test",
-        f"<h2>Test Email</h2><p>SMTP working! Domain: {config.AD_DOMAIN}</p>",
-        db
-    )
+    s, m = send_email(to, "AD Manager Pro - Test",
+        f"<h2>Test Email</h2><p>SMTP working! Domain: {config.AD_DOMAIN}</p>", db)
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": f"Test email sent to {to}"}
 
-# ═══ Reports ═════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# REPORTS
+# ═══════════════════════════════════════════════════════════
 @app.get("/api/reports/summary")
 async def report_summary(cu: AppUser = Depends(get_current_user)):
     try:
@@ -2940,13 +978,13 @@ async def report_summary(cu: AppUser = Depends(get_current_user)):
         groups    = ad_service.get_groups(show_builtin=False)
         computers = ad_service.get_computers()
         ous       = ad_service.get_ou_tree()
-        tu  = len(users)
-        ac  = len([u for u in users if u["status"] == "active"])
-        di  = len([u for u in users if u["status"] == "disabled"])
-        lo  = len([u for u in users if u["status"] == "locked"])
-        pn  = len([u for u in users if u.get("passwordNeverExpires")])
-        mc  = len([u for u in users if u.get("mustChangePassword")])
-        nl  = 0; i30 = 0; i90 = 0; i180 = 0
+        tu = len(users)
+        ac = len([u for u in users if u["status"] == "active"])
+        di = len([u for u in users if u["status"] == "disabled"])
+        lo = len([u for u in users if u["status"] == "locked"])
+        pn = len([u for u in users if u.get("passwordNeverExpires")])
+        mc = len([u for u in users if u.get("mustChangePassword")])
+        nl = 0; i30 = 0; i90 = 0; i180 = 0
         for u in users:
             ll = u.get("lastLogon", "")
             if not ll: nl += 1; continue
@@ -2957,28 +995,20 @@ async def report_summary(cu: AppUser = Depends(get_current_user)):
                 elif days > 90:  i90  += 1
                 elif days > 30:  i30  += 1
             except: nl += 1
-        return {
-            "users": {
-                "total": tu, "active": ac, "disabled": di, "locked": lo,
+        return {"users": {"total": tu, "active": ac, "disabled": di, "locked": lo,
                 "passwordNeverExpires": pn, "mustChangePassword": mc,
                 "neverLoggedIn": nl, "inactive30Days": i30,
-                "inactive90Days": i90, "inactive180Days": i180,
-            },
-            "groups": {
-                "total":        len(groups),
-                "security":     len([g for g in groups if g["type"] == "security"]),
+                "inactive90Days": i90, "inactive180Days": i180},
+            "groups": {"total": len(groups),
+                "security": len([g for g in groups if g["type"] == "security"]),
                 "distribution": len([g for g in groups if g["type"] == "distribution"]),
-                "empty":        len([g for g in groups if g["memberCount"] == 0]),
-            },
-            "computers": {
-                "total":    len(computers),
-                "active":   len([c for c in computers if c["status"] == "active"]),
+                "empty": len([g for g in groups if g["memberCount"] == 0])},
+            "computers": {"total": len(computers),
+                "active": len([c for c in computers if c["status"] == "active"]),
                 "inactive": len([c for c in computers if c["status"] == "inactive"]),
-                "disabled": len([c for c in computers if c["status"] == "disabled"]),
-            },
-            "ous":          {"total": len(ous)},
-            "generated_at": datetime.utcnow().isoformat(),
-        }
+                "disabled": len([c for c in computers if c["status"] == "disabled"])},
+            "ous": {"total": len(ous)},
+            "generated_at": datetime.utcnow().isoformat()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2988,10 +1018,8 @@ async def users_by_department(cu: AppUser = Depends(get_current_user)):
     d = {}
     for u in users:
         dp = u.get("department", "").strip() or "(No Department)"
-        if dp not in d:
-            d[dp] = {"total": 0, "active": 0, "disabled": 0, "locked": 0}
-        d[dp]["total"] += 1
-        d[dp][u["status"]] += 1
+        if dp not in d: d[dp] = {"total": 0, "active": 0, "disabled": 0, "locked": 0}
+        d[dp]["total"] += 1; d[dp][u["status"]] += 1
     r = [{"department": k, **v} for k, v in d.items()]
     r.sort(key=lambda x: x["total"], reverse=True)
     return {"departments": r, "count": len(r)}
@@ -3002,13 +1030,53 @@ async def comp_by_os(cu: AppUser = Depends(get_current_user)):
     oc = {}
     for c in cc:
         o = c.get("os", "").strip() or "Unknown"
-        if o not in oc:
-            oc[o] = {"total": 0, "active": 0, "inactive": 0, "disabled": 0}
-        oc[o]["total"] += 1
-        oc[o][c["status"]] += 1
+        if o not in oc: oc[o] = {"total": 0, "active": 0, "inactive": 0, "disabled": 0}
+        oc[o]["total"] += 1; oc[o][c["status"]] += 1
     r = [{"os": k, **v} for k, v in oc.items()]
     r.sort(key=lambda x: x["total"], reverse=True)
     return {"operatingSystems": r, "count": len(r)}
+
+@app.get("/api/reports/users/recently-active")
+async def recently_active_users(minutes: int = 15, cu: AppUser = Depends(get_current_user)):
+    u = ad_service.get_users(show_builtin=False)
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=minutes)
+    active = []
+    for x in u:
+        ll = x.get("lastLogon", "")
+        if not ll: continue
+        try:
+            d = datetime.fromisoformat(ll.replace('Z', '+00:00')).replace(tzinfo=None)
+            if d >= cutoff:
+                minutes_ago = int((now - d).total_seconds() / 60)
+                x["minutesAgo"] = minutes_ago
+                x["hoursAgo"] = round(minutes_ago / 60, 1)
+                active.append(x)
+        except: continue
+    active.sort(key=lambda x: x.get("minutesAgo", 999999))
+    return {"users": active, "count": len(active), "minutesThreshold": minutes}
+
+@app.get("/api/reports/users/domain-logins-summary")
+async def domain_logins_summary(cu: AppUser = Depends(get_current_user)):
+    u = ad_service.get_users(show_builtin=False)
+    now = datetime.utcnow()
+    counts = {"last15min": 0, "last1hour": 0, "last24hours": 0,
+        "last7days": 0, "last30days": 0, "neverLoggedIn": 0, "total": len(u)}
+    for x in u:
+        ll = x.get("lastLogon", "")
+        if not ll:
+            counts["neverLoggedIn"] += 1
+            continue
+        try:
+            d = datetime.fromisoformat(ll.replace('Z', '+00:00')).replace(tzinfo=None)
+            diff_min = (now - d).total_seconds() / 60
+            if diff_min <= 15:      counts["last15min"] += 1
+            if diff_min <= 60:      counts["last1hour"] += 1
+            if diff_min <= 1440:    counts["last24hours"] += 1
+            if diff_min <= 10080:   counts["last7days"] += 1
+            if diff_min <= 43200:   counts["last30days"] += 1
+        except: continue
+    return counts
 
 @app.get("/api/reports/users/never-logged-in")
 async def never_logged_in(cu: AppUser = Depends(get_current_user)):
@@ -3030,37 +1098,6 @@ async def inactive_users(days: int = 90, cu: AppUser = Depends(get_current_user)
         except: continue
     return {"users": r, "count": len(r), "daysThreshold": days}
 
-@app.get("/api/reports/users/password-expiring")
-async def pwd_expiring(days: int = 14, cu: AppUser = Depends(get_current_user)):
-    u  = ad_service.get_users(show_builtin=False)
-    co = datetime.utcnow() + timedelta(days=days)
-    r  = []
-    for x in u:
-        if x.get("passwordNeverExpires"): continue
-        pe = x.get("passwordExpiry", "")
-        if not pe: continue
-        try:
-            d  = datetime.fromisoformat(pe.replace('Z', '+00:00'))
-            dn = d.replace(tzinfo=None)
-            if dn < co and dn > datetime.utcnow(): r.append(x)
-        except: continue
-    return {"users": r, "count": len(r), "daysThreshold": days}
-
-@app.get("/api/reports/users/password-expired")
-async def pwd_expired(cu: AppUser = Depends(get_current_user)):
-    u   = ad_service.get_users(show_builtin=False)
-    now = datetime.utcnow()
-    r   = []
-    for x in u:
-        if x.get("passwordNeverExpires"): continue
-        pe = x.get("passwordExpiry", "")
-        if not pe: continue
-        try:
-            d = datetime.fromisoformat(pe.replace('Z', '+00:00'))
-            if d.replace(tzinfo=None) < now: r.append(x)
-        except: continue
-    return {"users": r, "count": len(r)}
-
 @app.get("/api/reports/users/locked")
 async def locked_users(cu: AppUser = Depends(get_current_user)):
     u = ad_service.get_users(show_builtin=False)
@@ -3073,158 +1110,55 @@ async def disabled_report(cu: AppUser = Depends(get_current_user)):
     r = [x for x in u if x["status"] == "disabled"]
     return {"users": r, "count": len(r)}
 
-@app.get("/api/reports/users/recent")
-async def recent_users(days: int = 30, cu: AppUser = Depends(get_current_user)):
-    u  = ad_service.get_users(show_builtin=False)
-    co = datetime.utcnow() - timedelta(days=days)
-    r  = []
-    for x in u:
-        c = x.get("created", "")
-        if not c: continue
-        try:
-            d = datetime.fromisoformat(c.replace('Z', '+00:00'))
-            if d.replace(tzinfo=None) > co: r.append(x)
-        except: continue
-    return {"users": r, "count": len(r), "daysThreshold": days}
-@app.get("/api/reports/users/recently-active")
-async def recently_active_users(minutes: int = 15, cu: AppUser = Depends(get_current_user)):
-    """Get users whose lastLogonTimestamp is within the last X minutes/hours"""
-    u = ad_service.get_users(show_builtin=False)
-    now = datetime.utcnow()
-    cutoff = now - timedelta(minutes=minutes)
-    active = []
-    for x in u:
-        ll = x.get("lastLogon", "")
-        if not ll: continue
-        try:
-            d = datetime.fromisoformat(ll.replace('Z', '+00:00')).replace(tzinfo=None)
-            if d >= cutoff:
-                minutes_ago = int((now - d).total_seconds() / 60)
-                x["minutesAgo"] = minutes_ago
-                x["hoursAgo"] = round(minutes_ago / 60, 1)
-                active.append(x)
-        except: continue
-    # Sort by most recent first
-    active.sort(key=lambda x: x.get("minutesAgo", 999999))
-    return {"users": active, "count": len(active), "minutesThreshold": minutes}
-
-
-@app.get("/api/reports/users/domain-logins-summary")
-async def domain_logins_summary(cu: AppUser = Depends(get_current_user)):
-    """Summary counts of user domain logins across time periods"""
-    u = ad_service.get_users(show_builtin=False)
-    now = datetime.utcnow()
-    counts = {
-        "last15min": 0,
-        "last1hour": 0,
-        "last24hours": 0,
-        "last7days": 0,
-        "last30days": 0,
-        "neverLoggedIn": 0,
-        "total": len(u)
-    }
-    for x in u:
-        ll = x.get("lastLogon", "")
-        if not ll:
-            counts["neverLoggedIn"] += 1
-            continue
-        try:
-            d = datetime.fromisoformat(ll.replace('Z', '+00:00')).replace(tzinfo=None)
-            diff_min = (now - d).total_seconds() / 60
-            if diff_min <= 15:      counts["last15min"] += 1
-            if diff_min <= 60:      counts["last1hour"] += 1
-            if diff_min <= 1440:    counts["last24hours"] += 1
-            if diff_min <= 10080:   counts["last7days"] += 1
-            if diff_min <= 43200:   counts["last30days"] += 1
-        except: continue
-    return counts
-@app.get("/api/reports/computers/inactive")
-async def inactive_comp(days: int = 90, cu: AppUser = Depends(get_current_user)):
-    cc = ad_service.get_computers()
-    co = datetime.utcnow() - timedelta(days=days)
-    r  = []
-    for c in cc:
-        ll = c.get("lastLogon", "")
-        if not ll: continue
-        try:
-            d = datetime.fromisoformat(ll.replace('Z', '+00:00'))
-            if d.replace(tzinfo=None) < co: r.append(c)
-        except: continue
-    return {"computers": r, "count": len(r), "daysThreshold": days}
-
-@app.get("/api/reports/groups/empty")
-async def empty_groups(cu: AppUser = Depends(get_current_user)):
-    g = ad_service.get_groups(show_builtin=False)
-    r = [x for x in g if x["memberCount"] == 0]
-    return {"groups": r, "count": len(r)}
-
-@app.get("/api/reports/groups/largest")
-async def largest_groups(limit: int = 20, cu: AppUser = Depends(get_current_user)):
-    g = ad_service.get_groups(show_builtin=False)
-    s = sorted(g, key=lambda x: x["memberCount"], reverse=True)[:limit]
-    return {"groups": s, "count": len(s)}
-
 @app.get("/api/reports/export/{report_type}")
-async def export_report(
-    report_type: str,
-    days: int = 90,
-    cu: AppUser = Depends(get_current_user)
-):
-    # NOTE: datetime and timedelta are module-level imports — do NOT import locally
+async def export_report(report_type: str, days: int = 90, cu: AppUser = Depends(get_current_user)):
     data    = []
     headers = []
     fn      = f"report-{report_type}-{datetime.now().strftime('%Y%m%d')}.csv"
-
     if report_type == "all-users":
-        u       = ad_service.get_users(show_builtin=False)
+        u = ad_service.get_users(show_builtin=False)
         headers = ["Username","Display Name","Email","Department","Status","Last Logon","OU"]
-        data    = [[str(x.get("username","")), str(x.get("displayName","")),
-                    str(x.get("email","")),    str(x.get("department","")),
-                    str(x.get("status","")),   str(x.get("lastLogon","")),
-                    str(x.get("ou",""))] for x in u]
-
+        data = [[str(x.get("username","")), str(x.get("displayName","")),
+            str(x.get("email","")), str(x.get("department","")),
+            str(x.get("status","")), str(x.get("lastLogon","")),
+            str(x.get("ou",""))] for x in u]
     elif report_type == "all-groups":
-        g       = ad_service.get_groups(show_builtin=False)
+        g = ad_service.get_groups(show_builtin=False)
         headers = ["Name","Description","Type","Members"]
-        data    = [[str(x.get("name","")), str(x.get("description","")),
-                    str(x.get("type","")), str(x.get("memberCount",""))] for x in g]
-
+        data = [[str(x.get("name","")), str(x.get("description","")),
+            str(x.get("type","")), str(x.get("memberCount",""))] for x in g]
     elif report_type == "active-users":
-        u      = ad_service.get_users(show_builtin=False)
+        u = ad_service.get_users(show_builtin=False)
         active = [x for x in u if x["status"] == "active"]
         headers = ["Username","Display Name","Email","Department","Title","Last Logon","OU"]
-        data    = [[str(x.get("username","")), str(x.get("displayName","")),
-                    str(x.get("email","")),    str(x.get("department","")),
-                    str(x.get("title","")),    str(x.get("lastLogon","")),
-                    str(x.get("ou",""))] for x in active]
-
+        data = [[str(x.get("username","")), str(x.get("displayName","")),
+            str(x.get("email","")), str(x.get("department","")),
+            str(x.get("title","")), str(x.get("lastLogon","")),
+            str(x.get("ou",""))] for x in active]
     elif report_type == "disabled-users":
-        u        = ad_service.get_users(show_builtin=False)
+        u = ad_service.get_users(show_builtin=False)
         disabled = [x for x in u if x["status"] == "disabled"]
-        headers  = ["Username","Display Name","Email","Department","Title","Last Logon","OU"]
-        data     = [[str(x.get("username","")), str(x.get("displayName","")),
-                     str(x.get("email","")),    str(x.get("department","")),
-                     str(x.get("title","")),    str(x.get("lastLogon","")),
-                     str(x.get("ou",""))] for x in disabled]
-
+        headers = ["Username","Display Name","Email","Department","Title","Last Logon","OU"]
+        data = [[str(x.get("username","")), str(x.get("displayName","")),
+            str(x.get("email","")), str(x.get("department","")),
+            str(x.get("title","")), str(x.get("lastLogon","")),
+            str(x.get("ou",""))] for x in disabled]
     elif report_type == "locked-users":
-        u       = ad_service.get_users(show_builtin=False)
-        locked  = [x for x in u if x["status"] == "locked"]
+        u = ad_service.get_users(show_builtin=False)
+        locked = [x for x in u if x["status"] == "locked"]
         headers = ["Username","Display Name","Email","Department","Title","OU"]
-        data    = [[str(x.get("username","")), str(x.get("displayName","")),
-                    str(x.get("email","")),    str(x.get("department","")),
-                    str(x.get("title","")),    str(x.get("ou",""))] for x in locked]
-
+        data = [[str(x.get("username","")), str(x.get("displayName","")),
+            str(x.get("email","")), str(x.get("department","")),
+            str(x.get("title","")), str(x.get("ou",""))] for x in locked]
     elif report_type == "never-logged-in":
-        u       = ad_service.get_users(show_builtin=False)
-        never   = [x for x in u if not x.get("lastLogon")]
+        u = ad_service.get_users(show_builtin=False)
+        never = [x for x in u if not x.get("lastLogon")]
         headers = ["Username","Display Name","Email","Department","Created","OU"]
-        data    = [[str(x.get("username","")), str(x.get("displayName","")),
-                    str(x.get("email","")),    str(x.get("department","")),
-                    str(x.get("created","")),  str(x.get("ou",""))] for x in never]
-
+        data = [[str(x.get("username","")), str(x.get("displayName","")),
+            str(x.get("email","")), str(x.get("department","")),
+            str(x.get("created","")), str(x.get("ou",""))] for x in never]
     elif report_type == "inactive-users":
-        u      = ad_service.get_users(show_builtin=False)
+        u = ad_service.get_users(show_builtin=False)
         cutoff = datetime.utcnow() - timedelta(days=days)
         inactive = []
         for x in u:
@@ -3232,33 +1166,27 @@ async def export_report(
             if not ll: continue
             try:
                 d = datetime.fromisoformat(ll.replace('Z', '+00:00'))
-                if d.replace(tzinfo=None) < cutoff:
-                    inactive.append(x)
+                if d.replace(tzinfo=None) < cutoff: inactive.append(x)
             except: continue
         headers = ["Username","Display Name","Email","Department","Last Logon","OU"]
-        data    = [[str(x.get("username","")), str(x.get("displayName","")),
-                    str(x.get("email","")),    str(x.get("department","")),
-                    str(x.get("lastLogon","")),str(x.get("ou",""))] for x in inactive]
-
+        data = [[str(x.get("username","")), str(x.get("displayName","")),
+            str(x.get("email","")), str(x.get("department","")),
+            str(x.get("lastLogon","")), str(x.get("ou",""))] for x in inactive]
     elif report_type == "all-computers":
-        c       = ad_service.get_computers()
+        c = ad_service.get_computers()
         headers = ["Name","OS","Status","Last Logon"]
-        data    = [[str(x.get("name","")), str(x.get("os","")),
-                    str(x.get("status","")), str(x.get("lastLogon",""))] for x in c]
-
+        data = [[str(x.get("name","")), str(x.get("os","")),
+            str(x.get("status","")), str(x.get("lastLogon",""))] for x in c]
     else:
         raise HTTPException(status_code=400, detail="Unknown report type")
-
-    o = io.StringIO()
-    w = csv.writer(o)
-    w.writerow(headers)
-    w.writerows(data)
-    o.seek(0)
+    o = io.StringIO(); w = csv.writer(o)
+    w.writerow(headers); w.writerows(data); o.seek(0)
     return StreamingResponse(o, media_type="text/csv", headers={
-        "Content-Disposition": f"attachment; filename={fn}"
-    })
+        "Content-Disposition": f"attachment; filename={fn}"})
 
-# ═══ Serve React Frontend ════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# SERVE REACT FRONTEND
+# ═══════════════════════════════════════════════════════════
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 INDEX_FILE = os.path.join(STATIC_DIR, "index.html")
 
@@ -3285,11 +1213,6 @@ else:
     async def api_only_root():
         return {"app": "AD Manager Pro", "version": "2.2.2", "status": "running"}
 
-# ═══ Entry Point ═════════════════════════════════════════
 if __name__ == "__main__":
-    uvicorn.run(
-        "app:app",
-        host=config.APP_HOST,
-        port=config.APP_PORT,
-        log_level="info"
-    )
+    uvicorn.run("app:app", host=config.APP_HOST,
+        port=int(os.getenv("APP_PORT", "8080")), log_level="info")

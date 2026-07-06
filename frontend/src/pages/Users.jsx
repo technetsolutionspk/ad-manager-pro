@@ -3,7 +3,7 @@ import {
   Search, Lock, Unlock, KeyRound, UserX, UserCheck,
   RefreshCw, X, UserPlus, Upload, Download, Edit, Trash2,
   Move, CheckSquare, Square, MoreVertical, Filter, FileText,
-  Eye, EyeOff, ArrowUpDown, ArrowUp, ArrowDown
+  Eye, EyeOff, ArrowUpDown, ArrowUp, ArrowDown, HardDrive
 } from 'lucide-react'
 import {
   getUsers, disableUser, enableUser, unlockUser, resetPassword,
@@ -29,7 +29,6 @@ export default function Users() {
   const [message, setMessage]           = useState(null)
   const user = JSON.parse(localStorage.getItem('user') || '{}')
 
-  // ── Bulk selection state ──
   const [selectedUsers, setSelectedUsers]     = useState(new Set())
   const [showBulkMenu, setShowBulkMenu]       = useState(false)
   const [showBulkMove, setShowBulkMove]       = useState(false)
@@ -37,7 +36,6 @@ export default function Users() {
   const [showBulkReset, setShowBulkReset]     = useState(false)
   const [statusFilter, setStatusFilter]       = useState('all')
 
-  // ── Sorting state ──
   const [sortBy, setSortBy]         = useState('displayName')
   const [sortOrder, setSortOrder]   = useState('asc')
 
@@ -166,19 +164,15 @@ export default function Users() {
     }
   }
 
-  // ── Sorting handler ──
   const handleSort = (column) => {
     if (sortBy === column) {
-      // Same column - toggle order
       setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
     } else {
-      // Different column - set new column and default to ascending
       setSortBy(column)
       setSortOrder('asc')
     }
   }
 
-  // ── Filter + Sort ──
   const filteredUsers = statusFilter === 'all'
     ? users
     : users.filter(u => u.status === statusFilter)
@@ -205,7 +199,6 @@ export default function Users() {
         valB = (b.department || '').toLowerCase()
         break
       case 'status':
-        // Custom order: active, locked, disabled
         const statusOrder = { active: 1, locked: 2, disabled: 3 }
         valA = statusOrder[a.status] || 99
         valB = statusOrder[b.status] || 99
@@ -219,7 +212,6 @@ export default function Users() {
     return 0
   })
 
-  // ── Sortable Column Header Component ──
   const SortableHeader = ({ column, label, className = '' }) => {
     const isActive = sortBy === column
     return (
@@ -243,7 +235,6 @@ export default function Users() {
 
   return (
     <div className="p-8">
-      {/* ── Header ── */}
       <div className="mb-6 flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-3xl font-bold mb-1">Users</h1>
@@ -325,7 +316,6 @@ export default function Users() {
         </div>
       </div>
 
-      {/* ── Message ── */}
       {message && (
         <div className={`mb-4 p-3 rounded-lg flex items-center justify-between ${
           message.type === 'success'
@@ -337,7 +327,6 @@ export default function Users() {
         </div>
       )}
 
-      {/* ── Search & Filters ── */}
       <div className="mb-6 flex gap-2 flex-wrap">
         <form onSubmit={handleSearch} className="flex-1 flex gap-2 min-w-[300px]">
           <div className="flex-1 relative">
@@ -370,7 +359,6 @@ export default function Users() {
         </div>
       </div>
 
-      {/* ── Users Table ── */}
       <div className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -498,13 +486,11 @@ export default function Users() {
         </div>
       </div>
 
-      {/* ── Reset Password Modal ── */}
       {showReset && selected && (
         <Modal title="Reset Password" onClose={closeResetModal}>
           <p className="text-sm text-slate-400 mb-4">
             Resetting password for <span className="text-white font-medium">{selected.username}</span>
           </p>
-
           <div className="relative mb-4">
             <input
               type={showPassword ? "text" : "password"}
@@ -515,81 +501,40 @@ export default function Users() {
               autoFocus
             />
             <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="p-1.5 hover:bg-slate-700 rounded text-slate-400"
-                title={showPassword ? "Hide password" : "Show password"}
-              >
+              <button type="button" onClick={() => setShowPassword(!showPassword)} className="p-1.5 hover:bg-slate-700 rounded text-slate-400">
                 {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
-              <button
-                type="button"
-                onClick={generatePassword}
-                className="px-2 py-1 text-xs bg-purple-600 hover:bg-purple-700 rounded text-white"
-                title="Generate strong password"
-              >
+              <button type="button" onClick={generatePassword} className="px-2 py-1 text-xs bg-purple-600 hover:bg-purple-700 rounded text-white">
                 Generate
               </button>
             </div>
           </div>
-
           {newPassword.length > 0 && newPassword.length < 8 && (
-            <p className="text-xs text-red-400 mb-3">
-              Password too short ({newPassword.length}/8 minimum)
-            </p>
+            <p className="text-xs text-red-400 mb-3">Password too short ({newPassword.length}/8 minimum)</p>
           )}
-
           <div className="space-y-2 mb-4">
             <label className="flex items-center gap-3 p-3 bg-slate-900 rounded-lg cursor-pointer hover:bg-slate-800 transition">
-              <input
-                type="checkbox"
-                checked={forceChange}
-                onChange={(e) => setForceChange(e.target.checked)}
-                className="w-4 h-4"
-              />
+              <input type="checkbox" checked={forceChange} onChange={(e) => setForceChange(e.target.checked)} className="w-4 h-4" />
               <div className="flex-1">
-                <div className="text-sm font-medium text-white">
-                  User must change password at next logon
-                </div>
-                <div className="text-xs text-slate-500">
-                  Forces the user to set their own password on next login
-                </div>
+                <div className="text-sm font-medium text-white">User must change password at next logon</div>
+                <div className="text-xs text-slate-500">Forces the user to set their own password on next login</div>
               </div>
             </label>
-
             {selected.locked && (
               <label className="flex items-center gap-3 p-3 bg-orange-900/20 border border-orange-700/30 rounded-lg cursor-pointer hover:bg-orange-900/30 transition">
-                <input
-                  type="checkbox"
-                  checked={unlockAccount}
-                  onChange={(e) => setUnlockAccount(e.target.checked)}
-                  className="w-4 h-4"
-                />
+                <input type="checkbox" checked={unlockAccount} onChange={(e) => setUnlockAccount(e.target.checked)} className="w-4 h-4" />
                 <div className="flex-1">
                   <div className="text-sm font-medium text-orange-300 flex items-center gap-2">
                     <Unlock size={14} /> Also unlock account
                   </div>
-                  <div className="text-xs text-slate-400">
-                    Account is currently locked. Check to unlock after password reset.
-                  </div>
+                  <div className="text-xs text-slate-400">Account is currently locked. Check to unlock after password reset.</div>
                 </div>
               </label>
             )}
           </div>
-
           <div className="flex gap-2 justify-end">
-            <button
-              onClick={closeResetModal}
-              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleResetPassword}
-              disabled={!newPassword || newPassword.length < 8}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-            >
+            <button onClick={closeResetModal} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg">Cancel</button>
+            <button onClick={handleResetPassword} disabled={!newPassword || newPassword.length < 8} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
               Reset Password
             </button>
           </div>
@@ -668,9 +613,6 @@ export default function Users() {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Modal Wrapper
-// ─────────────────────────────────────────────────────────
 function Modal({ title, children, onClose, wide = false }) {
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
@@ -687,9 +629,6 @@ function Modal({ title, children, onClose, wide = false }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Edit User Modal
-// ─────────────────────────────────────────────────────────
 function EditUserModal({ user, onClose, onSuccess, onError }) {
   const [form, setForm] = useState({
     firstName:            user.firstName            || '',
@@ -704,6 +643,8 @@ function EditUserModal({ user, onClose, onSuccess, onError }) {
     office:               user.office               || '',
     phone:                user.phone                || '',
     manager:              user.manager              || '',
+    homeDirectory:        user.homeDirectory        || '',
+    homeDrive:            user.homeDrive            || '',
     passwordNeverExpires: user.passwordNeverExpires || false,
     accountDisabled:      !user.enabled,
   })
@@ -750,6 +691,36 @@ function EditUserModal({ user, onClose, onSuccess, onError }) {
           </div>
         </div>
         <div>
+          <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wider flex items-center gap-2">
+            <HardDrive size={14} /> Home Folder
+          </h4>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="md:col-span-2">
+              <Input
+                label="Home Folder Path"
+                value={form.homeDirectory}
+                onChange={v => update('homeDirectory', v)}
+                placeholder="\\server\home\%username%"
+              />
+              <p className="text-xs text-slate-500 mt-1">Use %username% to auto-insert username</p>
+            </div>
+            <div>
+              <label className="block text-sm text-slate-400 mb-1">Drive Letter</label>
+              <select
+                value={form.homeDrive}
+                onChange={(e) => update('homeDrive', e.target.value)}
+                className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500"
+                style={{ colorScheme: 'dark' }}
+              >
+                <option value="">None</option>
+                {['H:','I:','J:','K:','L:','M:','N:','O:','P:','Q:','R:','S:','T:','U:','V:','W:','X:','Y:','Z:'].map(d => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+        <div>
           <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wider">Additional</h4>
           <div className="space-y-4">
             <Input label="Description" value={form.description} onChange={v => update('description', v)} />
@@ -788,9 +759,6 @@ function EditUserModal({ user, onClose, onSuccess, onError }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Move User Modal (Single)
-// ─────────────────────────────────────────────────────────
 function MoveUserModal({ user, onClose, onSuccess, onError }) {
   const [ous, setOus]           = useState([])
   const [targetOu, setTargetOu] = useState('')
@@ -838,9 +806,6 @@ function MoveUserModal({ user, onClose, onSuccess, onError }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Bulk Move Modal
-// ─────────────────────────────────────────────────────────
 function BulkMoveModal({ usernames, onClose, onSuccess, onError }) {
   const [ous, setOus]           = useState([])
   const [targetOu, setTargetOu] = useState('')
@@ -886,13 +851,11 @@ function BulkMoveModal({ usernames, onClose, onSuccess, onError }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Bulk Modify Modal
-// ─────────────────────────────────────────────────────────
 function BulkModifyModal({ usernames, onClose, onSuccess, onError }) {
   const [fields, setFields] = useState({
     department: '', title: '', company: '', office: '',
-    phone: '', description: '', manager: ''
+    phone: '', description: '', manager: '',
+    homeDirectory: '', homeDrive: ''
   })
   const [enabledFields, setEnabledFields] = useState({})
   const [modifying, setModifying]         = useState(false)
@@ -922,14 +885,17 @@ function BulkModifyModal({ usernames, onClose, onSuccess, onError }) {
     setModifying(false)
   }
 
-  const FieldRow = ({ name, label }) => (
-    <div className="flex items-center gap-3">
-      <input type="checkbox" checked={enabledFields[name] || false}
-             onChange={() => toggleField(name)} className="w-4 h-4 flex-shrink-0" />
-      <label className="w-32 text-sm text-slate-400">{label}</label>
-      <input type="text" value={fields[name]} disabled={!enabledFields[name]}
-             onChange={(e) => setFields({ ...fields, [name]: e.target.value })}
-             className="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg disabled:opacity-30" />
+  const FieldRow = ({ name, label, placeholder = '', help = '' }) => (
+    <div>
+      <div className="flex items-center gap-3">
+        <input type="checkbox" checked={enabledFields[name] || false}
+               onChange={() => toggleField(name)} className="w-4 h-4 flex-shrink-0" />
+        <label className="w-32 text-sm text-slate-400">{label}</label>
+        <input type="text" value={fields[name]} disabled={!enabledFields[name]} placeholder={placeholder}
+               onChange={(e) => setFields({ ...fields, [name]: e.target.value })}
+               className="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg disabled:opacity-30" />
+      </div>
+      {help && enabledFields[name] && <p className="text-xs text-slate-500 ml-40 mt-1">{help}</p>}
     </div>
   )
 
@@ -939,13 +905,28 @@ function BulkModifyModal({ usernames, onClose, onSuccess, onError }) {
         ✓ Check the fields you want to update. Unchecked fields will be left as is.
       </p>
       <div className="space-y-3 bg-slate-900 p-4 rounded-lg">
-        <FieldRow name="department"  label="Department" />
-        <FieldRow name="title"       label="Title" />
-        <FieldRow name="company"     label="Company" />
-        <FieldRow name="office"      label="Office" />
-        <FieldRow name="phone"       label="Phone" />
-        <FieldRow name="description" label="Description" />
-        <FieldRow name="manager"     label="Manager (DN)" />
+        <FieldRow name="department"    label="Department" />
+        <FieldRow name="title"         label="Title" />
+        <FieldRow name="company"       label="Company" />
+        <FieldRow name="office"        label="Office" />
+        <FieldRow name="phone"         label="Phone" />
+        <FieldRow name="description"   label="Description" />
+        <FieldRow name="manager"       label="Manager (DN)" />
+        <FieldRow name="homeDirectory" label="Home Folder" placeholder="\\server\home\%username%" help="Use %username% to insert each user's own username" />
+        <div className="flex items-center gap-3">
+          <input type="checkbox" checked={enabledFields.homeDrive || false}
+                 onChange={() => toggleField('homeDrive')} className="w-4 h-4 flex-shrink-0" />
+          <label className="w-32 text-sm text-slate-400">Home Drive</label>
+          <select value={fields.homeDrive} disabled={!enabledFields.homeDrive}
+                  onChange={(e) => setFields({ ...fields, homeDrive: e.target.value })}
+                  className="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg disabled:opacity-30"
+                  style={{ colorScheme: 'dark' }}>
+            <option value="">None</option>
+            {['H:','I:','J:','K:','L:','M:','N:','O:','P:','Q:','R:','S:','T:','U:','V:','W:','X:','Y:','Z:'].map(d => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+        </div>
       </div>
       <div className="flex gap-2 justify-end mt-6">
         <button onClick={onClose} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg">Cancel</button>
@@ -957,9 +938,6 @@ function BulkModifyModal({ usernames, onClose, onSuccess, onError }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Bulk Update from CSV Modal
-// ─────────────────────────────────────────────────────────
 function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
   const [csvText, setCsvText]   = useState('')
   const [rows, setRows]         = useState([])
@@ -997,9 +975,9 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
 
   const downloadTemplate = () => {
     const template = [
-      'username,department,title,office,phone,email,company,description',
-      'john.doe,Information Technology,Senior Developer,Building A,555-1234,john.doe@abasyn.local,Abasyn,',
-      'jane.smith,Human Resources,HR Manager,Building B,555-5678,jane.smith@abasyn.local,Abasyn,'
+      'username,department,title,office,phone,email,company,description,homeDirectory,homeDrive',
+      'john.doe,IT,Developer,Building A,555-1234,john.doe@abasyn.local,Abasyn,,\\\\server\\home\\%username%,H:',
+      'jane.smith,HR,Manager,Building B,555-5678,jane.smith@abasyn.local,Abasyn,,\\\\server\\home\\%username%,H:'
     ].join('\n')
     const blob = new Blob([template], { type: 'text/csv' })
     const url  = URL.createObjectURL(blob)
@@ -1012,9 +990,7 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
 
   const handleUpdate = async () => {
     if (rows.length === 0) { onError('No data to update'); return }
-    if (!confirm(
-      `Update ${rows.length} users?\n\nOnly fields with values will be updated.\nEmpty fields will be skipped.`
-    )) return
+    if (!confirm(`Update ${rows.length} users?\n\nOnly fields with values will be updated.\nEmpty fields will be skipped.`)) return
     setUpdating(true)
     try {
       const res = await bulkUpdateCsv(rows)
@@ -1035,64 +1011,47 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
           <p className="text-blue-300 font-medium mb-1">ℹ️ How this works:</p>
           <ul className="text-slate-300 space-y-1 list-disc list-inside text-xs">
             <li>CSV must have a <code className="bg-slate-900 px-1 rounded">username</code> column (required)</li>
-            <li>Other columns: <code className="bg-slate-900 px-1 rounded">department, title, office, phone, email, company, description</code></li>
+            <li>Supported: <code className="bg-slate-900 px-1 rounded">department, title, office, phone, email, company, description, homeDirectory, homeDrive</code></li>
+            <li>Home folder: use <code className="bg-slate-900 px-1 rounded">%username%</code> for auto-insertion</li>
             <li>Empty cells are skipped — existing AD values are kept</li>
-            <li>Users must already exist in AD (does NOT create new users)</li>
           </ul>
         </div>
 
         <div className="flex gap-2">
-          <input
-            type="file" accept=".csv"
-            onChange={handleFileUpload}
-            className="flex-1 px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm"
-          />
-          <button
-            onClick={downloadTemplate}
-            className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm whitespace-nowrap flex items-center gap-1"
-          >
+          <input type="file" accept=".csv" onChange={handleFileUpload}
+            className="flex-1 px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm" />
+          <button onClick={downloadTemplate}
+            className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm whitespace-nowrap flex items-center gap-1">
             <Download size={14} /> Template
           </button>
         </div>
 
         <div>
           <label className="text-sm text-slate-400 mb-1 block">Or paste CSV text:</label>
-          <textarea
-            value={csvText}
-            onChange={(e) => handleTextChange(e.target.value)}
-            rows={6}
-            placeholder="username,department,title&#10;john.doe,IT,Developer&#10;jane.smith,HR,Manager"
-            className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm font-mono"
-          />
+          <textarea value={csvText} onChange={(e) => handleTextChange(e.target.value)} rows={6}
+            placeholder="username,department,title&#10;john.doe,IT,Developer"
+            className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm font-mono" />
         </div>
 
         {rows.length > 0 && !result && (
           <div className="bg-slate-900 p-3 rounded-lg">
-            <p className="text-sm text-slate-300 mb-2 font-medium">
-              Preview ({rows.length} {rows.length === 1 ? 'row' : 'rows'}):
-            </p>
+            <p className="text-sm text-slate-300 mb-2 font-medium">Preview ({rows.length} rows):</p>
             <div className="max-h-40 overflow-auto text-xs">
               <table className="w-full">
                 <thead>
                   <tr className="text-slate-500 border-b border-slate-700">
-                    {Object.keys(rows[0]).map(k => (
-                      <th key={k} className="text-left p-1">{k}</th>
-                    ))}
+                    {Object.keys(rows[0]).map(k => (<th key={k} className="text-left p-1">{k}</th>))}
                   </tr>
                 </thead>
                 <tbody>
                   {rows.slice(0, 5).map((row, i) => (
                     <tr key={i} className="border-b border-slate-800">
-                      {Object.values(row).map((v, j) => (
-                        <td key={j} className="p-1 text-slate-300">{v || '—'}</td>
-                      ))}
+                      {Object.values(row).map((v, j) => (<td key={j} className="p-1 text-slate-300">{v || '—'}</td>))}
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {rows.length > 5 && (
-                <p className="text-slate-500 mt-1 text-xs">... and {rows.length - 5} more rows</p>
-              )}
+              {rows.length > 5 && <p className="text-slate-500 mt-1 text-xs">... and {rows.length - 5} more rows</p>}
             </div>
           </div>
         )}
@@ -1118,8 +1077,7 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
                 <p className="text-red-400 mb-2 font-medium">Errors:</p>
                 {result.errors.map((e, i) => (
                   <div key={i} className="text-slate-400 mb-1">
-                    Row {e.row} (<span className="font-mono text-white">{e.username}</span>):{' '}
-                    <span className="text-red-300">{e.error}</span>
+                    Row {e.row} (<span className="font-mono text-white">{e.username}</span>): <span className="text-red-300">{e.error}</span>
                   </div>
                 ))}
               </div>
@@ -1128,18 +1086,12 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
         )}
 
         <div className="flex gap-2 justify-end pt-2">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg"
-          >
+          <button onClick={onClose} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg">
             {result ? 'Close' : 'Cancel'}
           </button>
           {!result && (
-            <button
-              onClick={handleUpdate}
-              disabled={updating || rows.length === 0}
-              className="px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded-lg disabled:opacity-50 flex items-center gap-2"
-            >
+            <button onClick={handleUpdate} disabled={updating || rows.length === 0}
+              className="px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded-lg disabled:opacity-50 flex items-center gap-2">
               <FileText size={16} />
               {updating ? 'Updating...' : `Update ${rows.length} User${rows.length !== 1 ? 's' : ''}`}
             </button>
@@ -1150,9 +1102,6 @@ function BulkUpdateCsvModal({ onClose, onSuccess, onError }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Bulk Reset Password Modal
-// ─────────────────────────────────────────────────────────
 function BulkResetPasswordModal({ usernames, onClose, onSuccess, onError }) {
   const [password, setPassword]       = useState('')
   const [forceChange, setForceChange] = useState(true)
@@ -1188,55 +1137,31 @@ function BulkResetPasswordModal({ usernames, onClose, onSuccess, onError }) {
   return (
     <Modal title={`Reset Password for ${usernames.length} Users`} onClose={onClose}>
       <p className="text-sm text-slate-400 mb-4">All selected users will get the same new password.</p>
-
       <div className="relative mb-4">
-        <input
-          type={showPassword ? "text" : "password"}
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
+        <input type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)}
           placeholder="New password (min 8 chars)"
           className="w-full px-4 py-2.5 pr-28 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500"
-          autoFocus
-        />
+          autoFocus />
         <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
-          <button
-            type="button"
-            onClick={() => setShowPassword(!showPassword)}
-            className="p-1.5 hover:bg-slate-700 rounded text-slate-400"
-            title={showPassword ? "Hide password" : "Show password"}
-          >
+          <button type="button" onClick={() => setShowPassword(!showPassword)} className="p-1.5 hover:bg-slate-700 rounded text-slate-400">
             {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
           </button>
-          <button
-            type="button"
-            onClick={generatePassword}
-            className="px-2 py-1 text-xs bg-purple-600 hover:bg-purple-700 rounded text-white"
-          >
+          <button type="button" onClick={generatePassword} className="px-2 py-1 text-xs bg-purple-600 hover:bg-purple-700 rounded text-white">
             Generate
           </button>
         </div>
       </div>
-
       <label className="flex items-center gap-3 p-3 bg-slate-900 rounded-lg cursor-pointer hover:bg-slate-800 mb-4">
-        <input
-          type="checkbox"
-          checked={forceChange}
-          onChange={(e) => setForceChange(e.target.checked)}
-          className="w-4 h-4"
-        />
+        <input type="checkbox" checked={forceChange} onChange={(e) => setForceChange(e.target.checked)} className="w-4 h-4" />
         <div>
           <div className="text-sm font-medium text-white">User must change password at next logon</div>
           <div className="text-xs text-slate-500">All users will be forced to set their own password</div>
         </div>
       </label>
-
       <div className="flex gap-2 justify-end">
         <button onClick={onClose} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg">Cancel</button>
-        <button
-          onClick={handleReset}
-          disabled={resetting || !password || password.length < 8}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-        >
+        <button onClick={handleReset} disabled={resetting || !password || password.length < 8}
+          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
           {resetting ? 'Resetting...' : 'Reset Passwords'}
         </button>
       </div>
@@ -1244,14 +1169,12 @@ function BulkResetPasswordModal({ usernames, onClose, onSuccess, onError }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Create User Modal
-// ─────────────────────────────────────────────────────────
 function CreateUserModal({ onClose, onSuccess, onError }) {
   const [form, setForm] = useState({
     username: '', firstName: '', lastName: '', displayName: '',
     email: '', department: '', title: '', password: '',
-    ou: '', passwordNeverExpires: false, mustChangePassword: true
+    ou: '', homeDirectory: '', homeDrive: '',
+    passwordNeverExpires: false, mustChangePassword: true
   })
   const [ous, setOus]     = useState([])
   const [saving, setSaving] = useState(false)
@@ -1311,25 +1234,14 @@ function CreateUserModal({ onClose, onSuccess, onError }) {
         <div>
           <label className="block text-sm text-slate-400 mb-1">Password *</label>
           <div className="relative">
-            <input
-              type={showPassword ? "text" : "password"}
-              value={form.password}
+            <input type={showPassword ? "text" : "password"} value={form.password}
               onChange={(e) => update('password', e.target.value)}
-              className="w-full px-3 py-2 pr-24 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500"
-            />
+              className="w-full px-3 py-2 pr-24 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500" />
             <div className="absolute right-1 top-1/2 -translate-y-1/2 flex gap-1">
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="p-1 hover:bg-slate-700 rounded text-slate-400"
-              >
+              <button type="button" onClick={() => setShowPassword(!showPassword)} className="p-1 hover:bg-slate-700 rounded text-slate-400">
                 {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
               </button>
-              <button
-                type="button"
-                onClick={generatePassword}
-                className="px-2 py-0.5 text-xs bg-purple-600 hover:bg-purple-700 rounded text-white"
-              >
+              <button type="button" onClick={generatePassword} className="px-2 py-0.5 text-xs bg-purple-600 hover:bg-purple-700 rounded text-white">
                 Gen
               </button>
             </div>
@@ -1344,6 +1256,38 @@ function CreateUserModal({ onClose, onSuccess, onError }) {
             {ous.map(ou => <option key={ou.dn} value={ou.dn}>{ou.dn}</option>)}
           </select>
         </div>
+
+        <div className="md:col-span-2 pt-4 border-t border-slate-700">
+          <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wider flex items-center gap-2">
+            <HardDrive size={14} /> Home Folder (Optional)
+          </h4>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="md:col-span-2">
+              <Input
+                label="Network Path"
+                value={form.homeDirectory}
+                onChange={v => update('homeDirectory', v)}
+                placeholder="\\server\home\%username%"
+              />
+              <p className="text-xs text-slate-500 mt-1">%username% will be replaced with the actual username</p>
+            </div>
+            <div>
+              <label className="block text-sm text-slate-400 mb-1">Drive Letter</label>
+              <select
+                value={form.homeDrive}
+                onChange={(e) => update('homeDrive', e.target.value)}
+                className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500"
+                style={{ colorScheme: 'dark' }}
+              >
+                <option value="">None</option>
+                {['H:','I:','J:','K:','L:','M:','N:','O:','P:','Q:','R:','S:','T:','U:','V:','W:','X:','Y:','Z:'].map(d => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+
         <label className="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" checked={form.mustChangePassword}
                  onChange={(e) => update('mustChangePassword', e.target.checked)} />
@@ -1365,9 +1309,6 @@ function CreateUserModal({ onClose, onSuccess, onError }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Bulk Import Modal
-// ─────────────────────────────────────────────────────────
 function BulkImportModal({ onClose, onSuccess, onError }) {
   const [csvText, setCsvText]     = useState('')
   const [users, setUsers]         = useState([])
@@ -1413,9 +1354,9 @@ function BulkImportModal({ onClose, onSuccess, onError }) {
 
   const downloadTemplate = () => {
     const csv = [
-      'username,firstName,lastName,displayName,email,password,department,title',
-      'jdoe,John,Doe,John Doe,jdoe@abasyn.local,TempPass123!,IT,Developer',
-      'asmith,Alice,Smith,Alice Smith,asmith@abasyn.local,TempPass123!,HR,Manager'
+      'username,firstName,lastName,displayName,email,password,department,title,homeDirectory,homeDrive',
+      'jdoe,John,Doe,John Doe,jdoe@abasyn.local,TempPass123!,IT,Developer,\\\\server\\home\\%username%,H:',
+      'asmith,Alice,Smith,Alice Smith,asmith@abasyn.local,TempPass123!,HR,Manager,\\\\server\\home\\%username%,H:'
     ].join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const url  = URL.createObjectURL(blob)
@@ -1429,10 +1370,14 @@ function BulkImportModal({ onClose, onSuccess, onError }) {
       {!results ? (
         <>
           <div className="mb-4 p-4 bg-slate-900 rounded-lg">
-            <div className="text-sm text-slate-300 mb-2">Required CSV columns:</div>
+            <div className="text-sm text-slate-300 mb-2">Available CSV columns:</div>
             <code className="text-xs text-green-400 block">
-              username, firstName, lastName, email, password, department, title
+              username, firstName, lastName, email, password, department, title,<br/>
+              company, office, phone, description, homeDirectory, homeDrive
             </code>
+            <p className="text-xs text-slate-500 mt-2">
+              💡 Tip: Use <code className="bg-slate-950 px-1 rounded">%username%</code> in homeDirectory for auto-substitution
+            </p>
             <button onClick={downloadTemplate} className="mt-3 text-sm text-blue-400 hover:underline flex items-center gap-1">
               <Download size={14} /> Download Template
             </button>
@@ -1444,13 +1389,10 @@ function BulkImportModal({ onClose, onSuccess, onError }) {
           </div>
           <div className="mb-4">
             <label className="block text-sm text-slate-400 mb-2">Or Paste CSV</label>
-            <textarea
-              value={csvText}
+            <textarea value={csvText}
               onChange={(e) => { setCsvText(e.target.value); parseCSV(e.target.value) }}
-              placeholder="username,firstName,lastName,email,password..."
-              rows={6}
-              className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm font-mono"
-            />
+              placeholder="username,firstName,lastName,email,password..." rows={6}
+              className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm font-mono" />
           </div>
           {users.length > 0 && (
             <div className="mb-4 p-3 bg-slate-900 rounded-lg max-h-60 overflow-y-auto">
@@ -1460,7 +1402,7 @@ function BulkImportModal({ onClose, onSuccess, onError }) {
                   <tr className="text-slate-500">
                     <th className="text-left p-1">Username</th>
                     <th className="text-left p-1">Name</th>
-                    <th className="text-left p-1">Email</th>
+                    <th className="text-left p-1">Home Folder</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1468,7 +1410,7 @@ function BulkImportModal({ onClose, onSuccess, onError }) {
                     <tr key={i} className="border-t border-slate-800">
                       <td className="p-1">{u.username}</td>
                       <td className="p-1">{u.firstName} {u.lastName}</td>
-                      <td className="p-1">{u.email}</td>
+                      <td className="p-1 text-slate-400">{u.homeDirectory || '—'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1480,11 +1422,8 @@ function BulkImportModal({ onClose, onSuccess, onError }) {
           )}
           <div className="flex gap-2 justify-end">
             <button onClick={onClose} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg">Cancel</button>
-            <button
-              onClick={handleImport}
-              disabled={importing || users.length === 0}
-              className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg disabled:opacity-50"
-            >
+            <button onClick={handleImport} disabled={importing || users.length === 0}
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg disabled:opacity-50">
               {importing ? 'Importing...' : `Import ${users.length} Users`}
             </button>
           </div>
@@ -1526,19 +1465,12 @@ function BulkImportModal({ onClose, onSuccess, onError }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Input Component
-// ─────────────────────────────────────────────────────────
 function Input({ label, value, onChange, type = 'text', placeholder = '' }) {
   return (
     <div>
       <label className="block text-sm text-slate-400 mb-1">{label}</label>
-      <input
-        type={type} value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500"
-      />
+      <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500" />
     </div>
   )
 }
