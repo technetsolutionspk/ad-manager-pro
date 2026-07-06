@@ -3086,7 +3086,58 @@ async def recent_users(days: int = 30, cu: AppUser = Depends(get_current_user)):
             if d.replace(tzinfo=None) > co: r.append(x)
         except: continue
     return {"users": r, "count": len(r), "daysThreshold": days}
+@app.get("/api/reports/users/recently-active")
+async def recently_active_users(minutes: int = 15, cu: AppUser = Depends(get_current_user)):
+    """Get users whose lastLogonTimestamp is within the last X minutes/hours"""
+    u = ad_service.get_users(show_builtin=False)
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=minutes)
+    active = []
+    for x in u:
+        ll = x.get("lastLogon", "")
+        if not ll: continue
+        try:
+            d = datetime.fromisoformat(ll.replace('Z', '+00:00')).replace(tzinfo=None)
+            if d >= cutoff:
+                minutes_ago = int((now - d).total_seconds() / 60)
+                x["minutesAgo"] = minutes_ago
+                x["hoursAgo"] = round(minutes_ago / 60, 1)
+                active.append(x)
+        except: continue
+    # Sort by most recent first
+    active.sort(key=lambda x: x.get("minutesAgo", 999999))
+    return {"users": active, "count": len(active), "minutesThreshold": minutes}
 
+
+@app.get("/api/reports/users/domain-logins-summary")
+async def domain_logins_summary(cu: AppUser = Depends(get_current_user)):
+    """Summary counts of user domain logins across time periods"""
+    u = ad_service.get_users(show_builtin=False)
+    now = datetime.utcnow()
+    counts = {
+        "last15min": 0,
+        "last1hour": 0,
+        "last24hours": 0,
+        "last7days": 0,
+        "last30days": 0,
+        "neverLoggedIn": 0,
+        "total": len(u)
+    }
+    for x in u:
+        ll = x.get("lastLogon", "")
+        if not ll:
+            counts["neverLoggedIn"] += 1
+            continue
+        try:
+            d = datetime.fromisoformat(ll.replace('Z', '+00:00')).replace(tzinfo=None)
+            diff_min = (now - d).total_seconds() / 60
+            if diff_min <= 15:      counts["last15min"] += 1
+            if diff_min <= 60:      counts["last1hour"] += 1
+            if diff_min <= 1440:    counts["last24hours"] += 1
+            if diff_min <= 10080:   counts["last7days"] += 1
+            if diff_min <= 43200:   counts["last30days"] += 1
+        except: continue
+    return counts
 @app.get("/api/reports/computers/inactive")
 async def inactive_comp(days: int = 90, cu: AppUser = Depends(get_current_user)):
     cc = ad_service.get_computers()

@@ -232,5 +232,9 @@ export const getInactiveComputers = (days = 90) => api.get('/api/reports/compute
 export const getEmptyGroups = () => api.get('/api/reports/groups/empty').then(r => r.data)
 export const getLargestGroups = (limit = 20) => api.get('/api/reports/groups/largest', { params: { limit } }).then(r => r.data)
 export const exportReport = (type) => api.get(`/api/reports/export/${type}`, { responseType: 'blob' })
+export const getRecentlyActiveUsers = (minutes = 15) =>
+  api.get('/api/reports/users/recently-active', { params: { minutes } }).then(r => r.data)
 
+export const getDomainLoginsSummary = () =>
+  api.get('/api/reports/users/domain-logins-summary').then(r => r.data)
 export default api

@@ -7,10 +7,11 @@ import {
 import {
   Users, Shield, Monitor, FolderTree, Lock, KeyRound, AlertCircle,
   UserX, Building, Activity, RefreshCw, Clock, UserCheck,
-  Download, BarChart3, X, Eye
+  Download, BarChart3, X, Eye, LogIn, Filter
 } from 'lucide-react'
 import {
-  getReportSummary, getUsersByDepartment, getComputersByOS, exportReport
+  getReportSummary, getUsersByDepartment, getComputersByOS, exportReport,
+  getRecentlyActiveUsers, getDomainLoginsSummary
 } from '../api'
 
 export default function Reports() {
@@ -18,14 +19,21 @@ export default function Reports() {
   const [summary, setSummary]     = useState(null)
   const [loading, setLoading]     = useState(true)
   const [message, setMessage]     = useState(null)
+  const [loginsData, setLoginsData] = useState(null)
+  const [showActiveUsers, setShowActiveUsers] = useState(false)
+  const [activeUsersFilter, setActiveUsersFilter] = useState(15) // minutes
 
   useEffect(() => { loadSummary() }, [])
 
   const loadSummary = async () => {
     setLoading(true)
     try {
-      const data = await getReportSummary()
+      const [data, logins] = await Promise.all([
+        getReportSummary(),
+        getDomainLoginsSummary().catch(() => null)
+      ])
       setSummary(data)
+      setLoginsData(logins)
     } catch (err) {
       showMsg('error', err.response?.data?.detail || 'Failed to load')
     }
@@ -110,6 +118,72 @@ export default function Reports() {
         </div>
       )}
 
+      {/* ── Domain Login Activity (NEW) ── */}
+      {loginsData && (
+        <div className="mb-6 bg-slate-800 border border-slate-700 rounded-xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <LogIn className="text-green-400" size={22} />
+              <h2 className="text-xl font-bold">Domain Login Activity</h2>
+            </div>
+            <button
+              onClick={() => setShowActiveUsers(true)}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm flex items-center gap-2"
+            >
+              <Eye size={14} /> View Active Users
+            </button>
+          </div>
+          <div className="text-xs text-slate-500 mb-4">
+            ℹ️ Based on AD lastLogonTimestamp (updated every ~14 days by AD replication).
+            For real-time data, query domain controllers directly.
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            <LoginActivityCard
+              value={loginsData.last15min}
+              label="Last 15 min"
+              color="text-green-400"
+              bgColor="bg-green-500/10 border-green-500/30"
+              onClick={() => { setActiveUsersFilter(15); setShowActiveUsers(true) }}
+            />
+            <LoginActivityCard
+              value={loginsData.last1hour}
+              label="Last 1 hour"
+              color="text-cyan-400"
+              bgColor="bg-cyan-500/10 border-cyan-500/30"
+              onClick={() => { setActiveUsersFilter(60); setShowActiveUsers(true) }}
+            />
+            <LoginActivityCard
+              value={loginsData.last24hours}
+              label="Last 24 hours"
+              color="text-blue-400"
+              bgColor="bg-blue-500/10 border-blue-500/30"
+              onClick={() => { setActiveUsersFilter(1440); setShowActiveUsers(true) }}
+            />
+            <LoginActivityCard
+              value={loginsData.last7days}
+              label="Last 7 days"
+              color="text-purple-400"
+              bgColor="bg-purple-500/10 border-purple-500/30"
+              onClick={() => { setActiveUsersFilter(10080); setShowActiveUsers(true) }}
+            />
+            <LoginActivityCard
+              value={loginsData.last30days}
+              label="Last 30 days"
+              color="text-orange-400"
+              bgColor="bg-orange-500/10 border-orange-500/30"
+              onClick={() => { setActiveUsersFilter(43200); setShowActiveUsers(true) }}
+            />
+            <LoginActivityCard
+              value={loginsData.neverLoggedIn}
+              label="Never Logged In"
+              color="text-red-400"
+              bgColor="bg-red-500/10 border-red-500/30"
+              onClick={() => handleExport('never-logged-in', 'never-logged-in')}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Top Quick Stats */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <QuickStatCard icon={Lock} iconColor="text-red-500" iconBg="bg-red-500/10"
@@ -165,7 +239,205 @@ export default function Reports() {
           <ExportButton onClick={() => handleExport('all-computers', 'all-computers')} label="All Computers" />
         </div>
       </div>
+
+      {/* Active Users Modal */}
+      {showActiveUsers && (
+        <ActiveUsersModal
+          initialMinutes={activeUsersFilter}
+          onClose={() => setShowActiveUsers(false)}
+        />
+      )}
     </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────
+// Active Users Modal (NEW)
+// ─────────────────────────────────────────────────────────
+function ActiveUsersModal({ initialMinutes, onClose }) {
+  const [users, setUsers] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [minutes, setMinutes] = useState(initialMinutes)
+
+  const timeOptions = [
+    { value: 15,    label: 'Last 15 minutes' },
+    { value: 60,    label: 'Last 1 hour' },
+    { value: 1440,  label: 'Last 24 hours' },
+    { value: 10080, label: 'Last 7 days' },
+    { value: 43200, label: 'Last 30 days' }
+  ]
+
+  useEffect(() => { loadUsers() }, [minutes])
+
+  const loadUsers = async () => {
+    setLoading(true)
+    try {
+      const data = await getRecentlyActiveUsers(minutes)
+      setUsers(data.users || [])
+    } catch (err) {
+      console.error(err)
+    }
+    setLoading(false)
+  }
+
+  const formatTimeAgo = (min) => {
+    if (min < 1) return 'just now'
+    if (min < 60) return `${min} min ago`
+    if (min < 1440) return `${Math.floor(min / 60)} hr ago`
+    return `${Math.floor(min / 1440)} day${Math.floor(min / 1440) > 1 ? 's' : ''} ago`
+  }
+
+  const getActivityColor = (min) => {
+    if (min <= 15) return 'text-green-400 bg-green-500/10'
+    if (min <= 60) return 'text-cyan-400 bg-cyan-500/10'
+    if (min <= 1440) return 'text-blue-400 bg-blue-500/10'
+    if (min <= 10080) return 'text-purple-400 bg-purple-500/10'
+    return 'text-orange-400 bg-orange-500/10'
+  }
+
+  const exportCsv = () => {
+    const headers = ['Username', 'Display Name', 'Email', 'Department', 'Last Logon', 'Time Ago']
+    const rows = users.map(u => [
+      u.username,
+      u.displayName || '',
+      u.email || '',
+      u.department || '',
+      u.lastLogon || '',
+      formatTimeAgo(u.minutesAgo)
+    ])
+    const csv = [headers, ...rows].map(r => r.map(v => `"${v}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `active-users-${Date.now()}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
+      <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-5xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="p-6 border-b border-slate-700 flex items-center justify-between">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <LogIn className="text-green-400" size={22} />
+              <h3 className="text-xl font-bold">Recently Active Domain Users</h3>
+            </div>
+            <p className="text-sm text-slate-400">
+              Users who logged into the domain based on AD lastLogonTimestamp
+            </p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-700 rounded">
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Filters */}
+        <div className="p-4 border-b border-slate-700 flex items-center gap-3 flex-wrap">
+          <Filter size={16} className="text-slate-400" />
+          <span className="text-sm text-slate-400">Time period:</span>
+          <div className="flex gap-2 flex-wrap">
+            {timeOptions.map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => setMinutes(opt.value)}
+                className={`px-3 py-1.5 rounded-lg text-sm ${
+                  minutes === opt.value
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-900 hover:bg-slate-700 text-slate-300'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-sm text-slate-400">
+              {users.length} user{users.length !== 1 ? 's' : ''}
+            </span>
+            {users.length > 0 && (
+              <button
+                onClick={exportCsv}
+                className="px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded-lg text-sm flex items-center gap-1"
+              >
+                <Download size={14} /> CSV
+              </button>
+            )}
+            <button
+              onClick={loadUsers}
+              className="p-1.5 bg-slate-900 hover:bg-slate-700 rounded"
+              title="Refresh"
+            >
+              <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+            </button>
+          </div>
+        </div>
+
+        {/* User List */}
+        <div className="flex-1 overflow-y-auto">
+          {loading ? (
+            <div className="p-16 text-center text-slate-500">
+              <RefreshCw size={40} className="mx-auto mb-3 animate-spin text-blue-500" />
+              <p>Loading active users...</p>
+            </div>
+          ) : users.length === 0 ? (
+            <div className="p-16 text-center text-slate-500">
+              <UserX size={48} className="mx-auto mb-3" />
+              <p>No users logged in during this period</p>
+            </div>
+          ) : (
+            <table className="w-full">
+              <thead className="bg-slate-900 sticky top-0">
+                <tr className="text-left text-xs uppercase text-slate-400">
+                  <th className="p-3">User</th>
+                  <th className="p-3">Email</th>
+                  <th className="p-3">Department</th>
+                  <th className="p-3">Last Logon</th>
+                  <th className="p-3">Activity</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-700">
+                {users.map(u => (
+                  <tr key={u.id} className="hover:bg-slate-700/30">
+                    <td className="p-3">
+                      <div className="font-medium">{u.displayName || u.username}</div>
+                      <div className="text-xs text-slate-400 font-mono">{u.username}</div>
+                    </td>
+                    <td className="p-3 text-sm text-slate-300">{u.email || '—'}</td>
+                    <td className="p-3 text-sm text-slate-300">{u.department || '—'}</td>
+                    <td className="p-3 text-sm text-slate-400">
+                      {u.lastLogon ? new Date(u.lastLogon).toLocaleString() : '—'}
+                    </td>
+                    <td className="p-3">
+                      <span className={`px-2 py-1 rounded text-xs font-medium ${getActivityColor(u.minutesAgo)}`}>
+                        {formatTimeAgo(u.minutesAgo)}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────
+// Login Activity Card (NEW)
+// ─────────────────────────────────────────────────────────
+function LoginActivityCard({ value, label, color, bgColor, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`${bgColor} border rounded-lg p-4 hover:opacity-80 transition text-left`}
+    >
+      <div className={`text-3xl font-bold ${color} mb-1`}>{value}</div>
+      <div className="text-xs text-slate-400">{label}</div>
+    </button>
   )
 }
 
@@ -193,9 +465,6 @@ function QuickStatCard({ icon: Icon, iconColor, iconBg, value, label, action, on
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// User Reports Card
-// ─────────────────────────────────────────────────────────
 function UserReportsCard({ summary }) {
   const data = [
     { name: 'Total Users',    value: summary.users.total,           color: '#06b6d4' },
@@ -230,9 +499,6 @@ function UserReportsCard({ summary }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// System Reports Card
-// ─────────────────────────────────────────────────────────
 function SystemReportsCard({ summary }) {
   const data = [
     { name: 'Total',     value: summary.computers.total,    color: '#06b6d4' },
@@ -265,9 +531,6 @@ function SystemReportsCard({ summary }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Logged On User Report
-// ─────────────────────────────────────────────────────────
 function LoggedOnReportCard({ summary }) {
   const total = summary.users.total
   const neverLoggedIn = summary.users.neverLoggedIn
@@ -298,9 +561,6 @@ function LoggedOnReportCard({ summary }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Groups and OU Reports
-// ─────────────────────────────────────────────────────────
 function GroupsAndOUsCard({ summary }) {
   const data = [
     { name: 'Number of groups',          value: summary.groups.total,         color: '#06b6d4' },
@@ -328,9 +588,6 @@ function GroupsAndOUsCard({ summary }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Departments Chart
-// ─────────────────────────────────────────────────────────
 function DepartmentsChart() {
   const [data, setData] = useState([])
   const [loading, setLoading] = useState(true)
@@ -373,9 +630,6 @@ function DepartmentsChart() {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// OS Chart
-// ─────────────────────────────────────────────────────────
 function OperatingSystemChart() {
   const [data, setData] = useState([])
   const [loading, setLoading] = useState(true)
@@ -418,9 +672,6 @@ function OperatingSystemChart() {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Reusable Card
-// ─────────────────────────────────────────────────────────
 function Card({ title, children }) {
   return (
     <div className="bg-slate-800 border border-slate-700 rounded-lg p-5">
@@ -432,9 +683,6 @@ function Card({ title, children }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Legend Row
-// ─────────────────────────────────────────────────────────
 function LegendRow({ label, value, color }) {
   return (
     <div className="flex items-center justify-between py-1.5 px-2 hover:bg-slate-700/30 rounded text-sm">
@@ -447,9 +695,6 @@ function LegendRow({ label, value, color }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────
-// Export Button
-// ─────────────────────────────────────────────────────────
 function ExportButton({ onClick, label }) {
   return (
     <button
