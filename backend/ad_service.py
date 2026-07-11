@@ -1,11 +1,13 @@
 """
 AD Manager Pro - Active Directory Service
 ==========================================
-Contains: ADService class with all LDAP operations
+Contains: ADService class with all LDAP operations + Windows LAPS integration
 """
 
 import re
+import json
 import logging
+import subprocess
 from datetime import datetime, timedelta
 from fastapi import HTTPException
 from models import (
@@ -700,63 +702,64 @@ class ADService:
         except Exception as e:
             conn.unbind(); return False, str(e)
 
-def move_computer(self, name, target_ou):
-    """Move a computer to a different OU with detailed error reporting"""
-    conn = self._get_connection()
-    try:
-        # Step 1: Find the computer
-        conn.search(
-            search_base=self.base_dn,
-            search_filter=f"(&(objectClass=computer)(cn={name}))",
-            search_scope=SUBTREE,
-            attributes=["distinguishedName"]
-        )
-        if not conn.entries:
+    def move_computer(self, name, target_ou):
+        """Move computer to another OU - with detailed error reporting"""
+        conn = self._get_connection()
+        try:
+            conn.search(
+                search_base=self.base_dn,
+                search_filter=f"(&(objectClass=computer)(cn={name}))",
+                search_scope=SUBTREE,
+                attributes=["distinguishedName"]
+            )
+            if not conn.entries:
+                conn.unbind()
+                return False, f"Computer '{name}' not found in AD"
+
+            cdn = safe_str(conn.entries[0].distinguishedName.value)
+            rdn = cdn.split(",")[0]
+
+            try:
+                conn.search(
+                    search_base=target_ou,
+                    search_filter="(objectClass=*)",
+                    search_scope=BASE,
+                    attributes=["distinguishedName"]
+                )
+                if not conn.entries:
+                    conn.unbind()
+                    return False, f"Target OU not accessible: {target_ou}"
+            except Exception as ex:
+                conn.unbind()
+                return False, f"Target OU error: {str(ex)}"
+
+            current_parent = ",".join(cdn.split(",")[1:])
+            if current_parent.lower() == target_ou.lower():
+                conn.unbind()
+                return False, f"Computer already in this OU"
+
+            logger.info(f"Moving computer: FROM {cdn} TO {rdn},{target_ou}")
+
+            r = conn.modify_dn(cdn, rdn, new_superior=target_ou)
+
+            if not r:
+                desc = conn.result.get('description', 'Unknown')
+                msg  = conn.result.get('message', '')[:300]
+                code = conn.result.get('result', -1)
+                logger.error(f"Move failed: code={code}, desc={desc}, msg={msg}")
+                conn.unbind()
+                return False, f"AD rejected move: {desc} ({msg})"
+
             conn.unbind()
-            return False, f"Computer '{name}' not found in AD"
+            logger.info(f"OK: Moved {name} to {target_ou}")
+            return True, f"Moved '{name}' to '{target_ou}'"
 
-        cdn = safe_str(conn.entries[0].distinguishedName.value)
-        rdn = cdn.split(",")[0]  # e.g. "CN=PC-001"
+        except Exception as e:
+            logger.error(f"move_computer exception: {type(e).__name__}: {e}")
+            try: conn.unbind()
+            except: pass
+            return False, f"Exception: {type(e).__name__}: {str(e)}"
 
-        # Step 2: Validate target OU exists
-        conn.search(
-            search_base=target_ou,
-            search_filter="(objectClass=*)",
-            search_scope=BASE,
-            attributes=["distinguishedName"]
-        )
-        if not conn.entries:
-            conn.unbind()
-            return False, f"Target OU '{target_ou}' does not exist or not accessible"
-
-        # Step 3: Check if already in target OU
-        current_parent = ",".join(cdn.split(",")[1:])
-        if current_parent.lower() == target_ou.lower():
-            conn.unbind()
-            return False, f"Computer is already in '{target_ou}'"
-
-        logger.info(f"Moving computer: {cdn} -> {rdn} under {target_ou}")
-
-        # Step 4: Perform the move
-        r = conn.modify_dn(cdn, rdn, new_superior=target_ou)
-
-        if not r:
-            error_detail = conn.result.get('description', 'Unknown')
-            error_msg    = conn.result.get('message', '')[:200]
-            logger.error(f"Move failed: {error_detail} - {error_msg}")
-            conn.unbind()
-            return False, f"Move failed: {error_detail}. {error_msg}"
-
-        conn.unbind()
-        logger.info(f"OK: Computer {name} moved to {target_ou}")
-        return True, f"Computer '{name}' moved to '{target_ou}'"
-
-    except Exception as e:
-        logger.error(f"move_computer exception: {e}")
-        try: conn.unbind()
-        except: pass
-        return False, f"Move failed: {str(e)}"
-        
     def get_ou_tree(self):
         conn = self._get_connection()
         try:
@@ -928,6 +931,212 @@ def move_computer(self, name, target_ou):
                 "server": addr, "port": port, "ldaps": ssl, "base_dn": bdn}
         except Exception as e:
             return {"connected": False, "success": False, "error": str(e), "server": addr, "port": port}
+
+    # ═══════════════════════════════════════════════════════════
+    # WINDOWS LAPS INTEGRATION
+    # ═══════════════════════════════════════════════════════════
+    def get_laps_password(self, computer_name):
+        """Retrieve Windows LAPS password via PowerShell"""
+        try:
+            safe_name = ''.join(c for c in computer_name if c.isalnum() or c in '-_')
+            if safe_name != computer_name or not safe_name:
+                return None, "Invalid computer name"
+
+            ps_script = f'''
+$ErrorActionPreference = 'Stop'
+try {{
+    Import-Module LAPS -ErrorAction SilentlyContinue
+    $r = Get-LapsADPassword -Identity '{safe_name}' -AsPlainText
+    if ($r.DecryptionStatus -ne 'Success') {{
+        $obj = @{{
+            error = "Decryption failed: $($r.DecryptionStatus)"
+            authorizedDecryptor = "$($r.AuthorizedDecryptor)"
+        }}
+    }} else {{
+        $upd = ''
+        if ($r.PasswordUpdateTime) {{ $upd = $r.PasswordUpdateTime.ToString('o') }}
+        $exp = ''
+        if ($r.ExpirationTimestamp) {{ $exp = $r.ExpirationTimestamp.ToString('o') }}
+        $obj = @{{
+            computerName = "$($r.ComputerName)"
+            account = "$($r.Account)"
+            password = "$($r.Password)"
+            updated = $upd
+            expires = $exp
+            source = "$($r.Source)"
+            status = "$($r.DecryptionStatus)"
+            authorizedDecryptor = "$($r.AuthorizedDecryptor)"
+            dn = "$($r.DistinguishedName)"
+        }}
+    }}
+    $obj | ConvertTo-Json -Compress
+}} catch {{
+    @{{ error = "$($_.Exception.Message)" }} | ConvertTo-Json -Compress
+}}
+'''
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode != 0:
+                stderr = (result.stderr or "")[:300]
+                logger.error(f"LAPS PowerShell failed: {stderr}")
+                return None, f"PowerShell error: {stderr}"
+
+            stdout = (result.stdout or "").strip()
+            if not stdout:
+                return None, "No response from PowerShell"
+
+            try:
+                data = json.loads(stdout)
+            except json.JSONDecodeError:
+                logger.error(f"LAPS JSON parse failed: {stdout[:200]}")
+                return None, "Invalid response format from PowerShell"
+
+            if data.get("error"):
+                return None, data["error"]
+
+            return data, "Password retrieved"
+
+        except subprocess.TimeoutExpired:
+            return None, "PowerShell timeout (30 seconds)"
+        except FileNotFoundError:
+            return None, "PowerShell not found on server"
+        except Exception as e:
+            logger.error(f"LAPS retrieval exception: {e}")
+            return None, f"Error: {str(e)}"
+
+    def get_laps_password_history(self, computer_name):
+        """Get Windows LAPS password history"""
+        try:
+            safe_name = ''.join(c for c in computer_name if c.isalnum() or c in '-_')
+            if safe_name != computer_name or not safe_name:
+                return None, "Invalid computer name"
+
+            ps_script = f'''
+$ErrorActionPreference = 'Stop'
+try {{
+    Import-Module LAPS -ErrorAction SilentlyContinue
+    $h = Get-LapsADPassword -Identity '{safe_name}' -IncludeHistory -AsPlainText
+    $arr = @()
+    foreach ($p in $h) {{
+        $upd = ''
+        if ($p.PasswordUpdateTime) {{ $upd = $p.PasswordUpdateTime.ToString('o') }}
+        $arr += @{{
+            password = "$($p.Password)"
+            updated = $upd
+            status = "$($p.DecryptionStatus)"
+            source = "$($p.Source)"
+            account = "$($p.Account)"
+        }}
+    }}
+    if ($arr.Count -eq 0) {{
+        '[]'
+    }} else {{
+        $arr | ConvertTo-Json -Compress -Depth 3
+    }}
+}} catch {{
+    @{{ error = "$($_.Exception.Message)" }} | ConvertTo-Json -Compress
+}}
+'''
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                capture_output=True, text=True, timeout=30
+            )
+
+            if result.returncode != 0:
+                return None, f"PowerShell error: {(result.stderr or '')[:200]}"
+
+            stdout = (result.stdout or "").strip()
+            if not stdout:
+                return [], "No history available"
+
+            try:
+                data = json.loads(stdout)
+            except json.JSONDecodeError:
+                return None, "Invalid response format"
+
+            if isinstance(data, dict) and data.get("error"):
+                return None, data["error"]
+
+            if isinstance(data, dict):
+                data = [data]
+
+            return data, f"Retrieved {len(data)} password(s)"
+
+        except subprocess.TimeoutExpired:
+            return None, "PowerShell timeout"
+        except Exception as e:
+            logger.error(f"LAPS history exception: {e}")
+            return None, f"Error: {str(e)}"
+
+    def reset_laps_password(self, computer_name):
+        """Force LAPS to rotate password on computer's next check-in"""
+        conn = self._get_connection()
+        try:
+            conn.search(
+                search_base=self.base_dn,
+                search_filter=f"(&(objectClass=computer)(cn={computer_name}))",
+                search_scope=SUBTREE,
+                attributes=["distinguishedName"]
+            )
+            if not conn.entries:
+                conn.unbind()
+                return False, f"Computer '{computer_name}' not found"
+
+            dn = safe_str(conn.entries[0].distinguishedName.value)
+            r = conn.modify(dn, {
+                "msLAPS-PasswordExpirationTime": [(MODIFY_REPLACE, ["0"])]
+            })
+
+            if not r:
+                error = conn.result.get('description', 'Unknown')
+                msg = conn.result.get('message', '')[:200]
+                conn.unbind()
+                return False, f"AD modify failed: {error} - {msg}"
+
+            conn.unbind()
+            logger.info(f"OK: LAPS rotation scheduled for {computer_name}")
+            return True, f"Password rotation scheduled for '{computer_name}' on next check-in"
+
+        except Exception as e:
+            try: conn.unbind()
+            except: pass
+            logger.error(f"LAPS rotate exception: {e}")
+            return False, str(e)
+
+    def check_laps_enabled(self, computer_name):
+        """Check if LAPS is configured for a computer"""
+        conn = self._get_connection()
+        try:
+            conn.search(
+                search_base=self.base_dn,
+                search_filter=f"(&(objectClass=computer)(cn={computer_name}))",
+                search_scope=SUBTREE,
+                attributes=["msLAPS-Password", "msLAPS-EncryptedPassword", "msLAPS-PasswordExpirationTime"]
+            )
+            if not conn.entries:
+                conn.unbind()
+                return False
+
+            e = conn.entries[0]
+            has_laps = False
+            try:
+                if e['msLAPS-Password'].value: has_laps = True
+            except: pass
+            try:
+                if e['msLAPS-EncryptedPassword'].value: has_laps = True
+            except: pass
+
+            conn.unbind()
+            return has_laps
+        except:
+            try: conn.unbind()
+            except: pass
+            return False
 
     def _find_user(self, conn, username):
         conn.search(search_base=self.base_dn,

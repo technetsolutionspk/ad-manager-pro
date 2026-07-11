@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app):
-    logger.info("AD Manager Pro v2.2.2 Starting")
+    logger.info("AD Manager Pro v2.4.0 Starting")
     db = SessionLocal()
     try:
         init_default_settings(db)
@@ -47,7 +47,7 @@ async def lifespan(app):
         db.close()
     yield
 
-app = FastAPI(title="AD Manager Pro API", version="2.2.2", lifespan=lifespan, docs_url="/docs", redoc_url="/redoc")
+app = FastAPI(title="AD Manager Pro API", version="2.4.0", lifespan=lifespan, docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(CORSMiddleware,
     allow_origins=["http://localhost:5173","http://localhost:3000","https://localhost:8443","http://localhost","https://localhost","*"],
     allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -529,6 +529,91 @@ async def move_computer(name: str, payload: dict, cu: AppUser = Depends(get_curr
     s, m = ad_service.move_computer(name, tou)
     if not s: raise HTTPException(status_code=500, detail=m)
     return {"success": True, "message": m}
+
+# ═══════════════════════════════════════════════════════════
+# WINDOWS LAPS - Admin Only, Audited
+# ═══════════════════════════════════════════════════════════
+@app.get("/api/computers/{name}/laps")
+async def get_laps_password_route(
+    name: str,
+    reason: Optional[str] = None,
+    request: Request = None,
+    cu: AppUser = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Retrieve LAPS password (Admin only, requires reason for audit)"""
+    if not reason or len(reason.strip()) < 5:
+        raise HTTPException(status_code=400, detail="Reason required (min 5 chars) - e.g. ticket number")
+
+    reason = reason.strip()[:200]
+    ip = get_client_ip(request)
+    data, message = ad_service.get_laps_password(name)
+
+    log_action(
+        db, cu.username, cu.role,
+        "LAPS Password Viewed" if data else "LAPS View Failed",
+        "Computer", name,
+        f"Reason: {reason} | Result: {message}",
+        "Success" if data else "Failed",
+        ip
+    )
+
+    if not data:
+        raise HTTPException(status_code=404, detail=message)
+    return data
+
+
+@app.get("/api/computers/{name}/laps/history")
+async def get_laps_history_route(
+    name: str,
+    reason: Optional[str] = None,
+    request: Request = None,
+    cu: AppUser = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Retrieve LAPS password history (Admin only)"""
+    if not reason or len(reason.strip()) < 5:
+        raise HTTPException(status_code=400, detail="Reason required")
+
+    reason = reason.strip()[:200]
+    ip = get_client_ip(request)
+    data, message = ad_service.get_laps_password_history(name)
+
+    log_action(
+        db, cu.username, cu.role,
+        "LAPS History Viewed" if data is not None else "LAPS History Failed",
+        "Computer", name,
+        f"Reason: {reason} | Count: {len(data) if data else 0}",
+        "Success" if data is not None else "Failed",
+        ip
+    )
+
+    if data is None:
+        raise HTTPException(status_code=404, detail=message)
+    return {"history": data, "count": len(data)}
+
+
+@app.post("/api/computers/{name}/laps/rotate")
+async def rotate_laps_password_route(
+    name: str,
+    request: Request,
+    cu: AppUser = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Force LAPS password rotation (Admin only)"""
+    success, message = ad_service.reset_laps_password(name)
+
+    log_action(
+        db, cu.username, cu.role,
+        "LAPS Password Rotation Requested",
+        "Computer", name, message,
+        "Success" if success else "Failed",
+        get_client_ip(request)
+    )
+
+    if not success:
+        raise HTTPException(status_code=500, detail=message)
+    return {"success": True, "message": message}
 
 # ═══════════════════════════════════════════════════════════
 # OUs

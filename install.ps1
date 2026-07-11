@@ -3,7 +3,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$Version = "2.2.2"
+$Version = "2.4.0"
 $AppPort = "8080"
 
 function Write-Step([string]$N, [string]$T) {
@@ -399,7 +399,7 @@ $pyL += "import sys, os"
 $pyL += "os.chdir(r'" + $backendDir + "')"
 $pyL += "sys.path.insert(0, r'" + $backendDir + "')"
 $pyL += "try:"
-$pyL += "    from app import AppUser, SessionLocal"
+$pyL += "    from models import AppUser, SessionLocal"
 $pyL += "    db = SessionLocal()"
 $pyL += "    ex = db.query(AppUser).filter(AppUser.username == '" + $adminUser + "').first()"
 $pyL += "    if not ex:"
@@ -539,6 +539,12 @@ Write-Host "  Access URLs:" -ForegroundColor Cyan
 Write-Host "    http://${hn}:$AppPort" -ForegroundColor White
 foreach ($ip in $ips) { Write-Host "    http://${ip}:$AppPort" -ForegroundColor Gray }
 Write-Host "    http://localhost:$AppPort" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  Optional: Windows LAPS Integration:" -ForegroundColor Cyan
+Write-Host "    To enable LAPS password viewing, on your Domain Controller run:" -ForegroundColor Gray
+Write-Host "    Add-ADGroupMember -Identity 'IT Admins' -Members '$hn`$'" -ForegroundColor DarkGray
+Write-Host "    Then REBOOT this server for the change to take effect" -ForegroundColor Yellow
+Write-Host "    Verify with: See documentation.md section 11" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Login:" -ForegroundColor Cyan
 Write-Host "    Username: $adminUser" -ForegroundColor White

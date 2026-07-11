@@ -237,4 +237,15 @@ export const getRecentlyActiveUsers = (minutes = 15) =>
 
 export const getDomainLoginsSummary = () =>
   api.get('/api/reports/users/domain-logins-summary').then(r => r.data)
+// ════════════════════════════════════════════════════════════
+// WINDOWS LAPS (Admin only, audited)
+// ════════════════════════════════════════════════════════════
+export const getLapsPassword = (name, reason) =>
+  api.get(`/api/computers/${name}/laps`, { params: { reason } }).then(r => r.data)
+
+export const getLapsHistory = (name, reason) =>
+  api.get(`/api/computers/${name}/laps/history`, { params: { reason } }).then(r => r.data)
+
+export const rotateLapsPassword = (name) =>
+  api.post(`/api/computers/${name}/laps/rotate`).then(r => r.data)
 export default api
