@@ -700,18 +700,63 @@ class ADService:
         except Exception as e:
             conn.unbind(); return False, str(e)
 
-    def move_computer(self, name, target_ou):
-        conn = self._get_connection()
-        try:
-            conn.search(search_base=self.base_dn, search_filter=f"(&(objectClass=computer)(cn={name}))", attributes=["distinguishedName"])
-            if not conn.entries: conn.unbind(); return False, "Not found"
-            cdn = safe_str(conn.entries[0].distinguishedName.value)
-            r   = conn.modify_dn(cdn, cdn.split(",")[0], new_superior=target_ou)
+def move_computer(self, name, target_ou):
+    """Move a computer to a different OU with detailed error reporting"""
+    conn = self._get_connection()
+    try:
+        # Step 1: Find the computer
+        conn.search(
+            search_base=self.base_dn,
+            search_filter=f"(&(objectClass=computer)(cn={name}))",
+            search_scope=SUBTREE,
+            attributes=["distinguishedName"]
+        )
+        if not conn.entries:
             conn.unbind()
-            return r, "Moved" if r else "Failed"
-        except Exception as e:
-            conn.unbind(); return False, str(e)
+            return False, f"Computer '{name}' not found in AD"
 
+        cdn = safe_str(conn.entries[0].distinguishedName.value)
+        rdn = cdn.split(",")[0]  # e.g. "CN=PC-001"
+
+        # Step 2: Validate target OU exists
+        conn.search(
+            search_base=target_ou,
+            search_filter="(objectClass=*)",
+            search_scope=BASE,
+            attributes=["distinguishedName"]
+        )
+        if not conn.entries:
+            conn.unbind()
+            return False, f"Target OU '{target_ou}' does not exist or not accessible"
+
+        # Step 3: Check if already in target OU
+        current_parent = ",".join(cdn.split(",")[1:])
+        if current_parent.lower() == target_ou.lower():
+            conn.unbind()
+            return False, f"Computer is already in '{target_ou}'"
+
+        logger.info(f"Moving computer: {cdn} -> {rdn} under {target_ou}")
+
+        # Step 4: Perform the move
+        r = conn.modify_dn(cdn, rdn, new_superior=target_ou)
+
+        if not r:
+            error_detail = conn.result.get('description', 'Unknown')
+            error_msg    = conn.result.get('message', '')[:200]
+            logger.error(f"Move failed: {error_detail} - {error_msg}")
+            conn.unbind()
+            return False, f"Move failed: {error_detail}. {error_msg}"
+
+        conn.unbind()
+        logger.info(f"OK: Computer {name} moved to {target_ou}")
+        return True, f"Computer '{name}' moved to '{target_ou}'"
+
+    except Exception as e:
+        logger.error(f"move_computer exception: {e}")
+        try: conn.unbind()
+        except: pass
+        return False, f"Move failed: {str(e)}"
+        
     def get_ou_tree(self):
         conn = self._get_connection()
         try:

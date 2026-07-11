@@ -1,276 +1,479 @@
-# AD Manager Pro - Service Account Permission Setup
-# Run this on the Domain Controller as Domain Admin
-# This grants the service account full CRUD permissions on all OUs
+# ═══════════════════════════════════════════════════════════════════
+# AD Manager Pro - Domain Controller Permission Setup Script
+# Version: 2.3.0
+# ═══════════════════════════════════════════════════════════════════
+#
+# PURPOSE:
+#   Grants an AD service account all permissions required to fully
+#   manage users, groups, computers, OUs, GPOs, and photos via LDAP.
+#
+# REQUIREMENTS:
+#   - Must be run on a Domain Controller
+#   - Must be run as Domain Admin (or Enterprise Admin)
+#   - The service account must already exist in Active Directory
+#
+# USAGE:
+#   powershell -ExecutionPolicy Bypass -File setup_permissions.ps1
+#
+# ═══════════════════════════════════════════════════════════════════
+
+param(
+    [string]$ServiceAccount = "",
+    [switch]$Quiet
+)
 
 $ErrorActionPreference = "Continue"
+$Version = "2.3.0"
 
-Write-Host ""
-Write-Host "  ============================================" -ForegroundColor Cyan
-Write-Host "   AD Manager Pro - Permission Setup" -ForegroundColor Cyan
-Write-Host "  ============================================" -ForegroundColor Cyan
-Write-Host ""
-
-# Check if running as admin
-$id = [Security.Principal.WindowsIdentity]::GetCurrent()
-$pr = New-Object Security.Principal.WindowsPrincipal($id)
-if (-not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "  [X] Must run as Administrator / Domain Admin" -ForegroundColor Red
-    Read-Host "  Press Enter to exit"
-    exit 1
+# ─────────────────────────────────────────────────────────────────
+# Helper Functions
+# ─────────────────────────────────────────────────────────────────
+function Write-Header([string]$Text) {
+    Write-Host ""
+    Write-Host "  ════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "   $Text" -ForegroundColor Cyan
+    Write-Host "  ════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ""
 }
 
-# Check if dsacls is available
-try {
-    $dsaclsTest = & dsacls /? 2>&1
-    Write-Host "  [OK] dsacls found" -ForegroundColor Green
-} catch {
-    Write-Host "  [X] dsacls not found. Install RSAT:" -ForegroundColor Red
-    Write-Host "      Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0" -ForegroundColor Yellow
-    Read-Host "  Press Enter to exit"
-    exit 1
+function Write-Section([string]$Text) {
+    Write-Host ""
+    Write-Host "  ── $Text ──────────────────────────────" -ForegroundColor Yellow
 }
 
-# Get domain info
-try {
-    $domain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
-    $domainDN = ($domain.Name.Split(".") | ForEach-Object { "DC=$_" }) -join ","
-    $domainName = $domain.Name
-    $netbios = $domain.Name.Split(".")[0].ToUpper()
-    Write-Host "  [OK] Domain: $domainName" -ForegroundColor Green
-    Write-Host "  [OK] Base DN: $domainDN" -ForegroundColor Green
-} catch {
-    Write-Host "  [X] Cannot detect domain. Are you on a Domain Controller?" -ForegroundColor Red
-    Read-Host "  Press Enter to exit"
-    exit 1
+function Write-OK([string]$Text) {
+    Write-Host "  [OK]   " -ForegroundColor Green -NoNewline
+    Write-Host $Text -ForegroundColor Gray
 }
 
-# Ask for service account name
-Write-Host ""
-Write-Host "  Enter the service account name used by AD Manager Pro" -ForegroundColor White
-Write-Host "  Example: svc-admanager" -ForegroundColor Gray
-Write-Host ""
-Write-Host "  Service account name: " -ForegroundColor Yellow -NoNewline
-$svcAccount = Read-Host
-if (-not $svcAccount) { $svcAccount = "svc-admanager" }
-$svcAccount = $svcAccount.Trim()
-$fullAccount = "$netbios\$svcAccount"
-
-# Verify account exists
-try {
-    $searcher = New-Object System.DirectoryServices.DirectorySearcher
-    $searcher.Filter = "(&(objectClass=user)(sAMAccountName=$svcAccount))"
-    $result = $searcher.FindOne()
-    if ($result) {
-        Write-Host "  [OK] Account found: $($result.Properties['distinguishedname'][0])" -ForegroundColor Green
-    } else {
-        Write-Host "  [X] Account '$svcAccount' not found in AD" -ForegroundColor Red
-        Write-Host "  Create it first or check the spelling" -ForegroundColor Yellow
-        Read-Host "  Press Enter to exit"
-        exit 1
-    }
-} catch {
-    Write-Host "  [i] Could not verify account, continuing anyway..." -ForegroundColor Blue
+function Write-Fail([string]$Text) {
+    Write-Host "  [FAIL] " -ForegroundColor Red -NoNewline
+    Write-Host $Text -ForegroundColor Gray
 }
 
-# Summary
-Write-Host ""
-Write-Host "  ============================================" -ForegroundColor Cyan
-Write-Host "  Permission Summary" -ForegroundColor Cyan
-Write-Host "  ============================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  Account : $fullAccount" -ForegroundColor White
-Write-Host "  Domain  : $domainName" -ForegroundColor White
-Write-Host "  Base DN : $domainDN" -ForegroundColor White
-Write-Host ""
-Write-Host "  Permissions to be granted:" -ForegroundColor White
-Write-Host "    - Read all objects (Generic Read)" -ForegroundColor Gray
-Write-Host "    - Create/Delete users, groups, computers, OUs" -ForegroundColor Gray
-Write-Host "    - Write all user properties" -ForegroundColor Gray
-Write-Host "    - Reset passwords (unicodePwd + pwdLastSet)" -ForegroundColor Gray
-Write-Host "    - Enable/Disable accounts (userAccountControl)" -ForegroundColor Gray
-Write-Host "    - Unlock accounts (lockoutTime)" -ForegroundColor Gray
-Write-Host "    - Manage group membership (member)" -ForegroundColor Gray
-Write-Host "    - Manage user photos (thumbnailPhoto)" -ForegroundColor Gray
-Write-Host "    - Manage computer accounts" -ForegroundColor Gray
-Write-Host "    - Read GPO objects and links" -ForegroundColor Gray
-Write-Host ""
+function Write-Info([string]$Text) {
+    Write-Host "  [i]    " -ForegroundColor Blue -NoNewline
+    Write-Host $Text -ForegroundColor Gray
+}
 
-Write-Host "  Apply these permissions? (yes/no) [yes]: " -ForegroundColor Yellow -NoNewline
-$confirm = Read-Host
-if (-not $confirm) { $confirm = "yes" }
-if ($confirm -ne "yes") { Write-Host "  Cancelled" -ForegroundColor Yellow; exit 0 }
+function Write-Warn([string]$Text) {
+    Write-Host "  [!]    " -ForegroundColor Yellow -NoNewline
+    Write-Host $Text -ForegroundColor Gray
+}
 
-Write-Host ""
-$success = 0
-$failed = 0
+function Test-Admin {
+    $identity  = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 
-function Run-Dsacls([string]$Target, [string]$Params, [string]$Desc) {
-    Write-Host "  Setting: $Desc..." -ForegroundColor Gray -NoNewline
+function Get-DomainInfo {
     try {
-        $cmd = "dsacls `"$Target`" $Params"
-        $output = & cmd /c $cmd 2>&1
-        $exitCode = $LASTEXITCODE
-        if ($exitCode -eq 0 -or $output -match "successfully") {
-            Write-Host " OK" -ForegroundColor Green
-            $script:success++
-        } else {
-            Write-Host " FAILED" -ForegroundColor Red
-            $script:failed++
+        $domain   = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+        $domainDn = "DC=" + ($domain.Name -replace "\.", ",DC=")
+        return @{
+            Name = $domain.Name
+            DN   = $domainDn
+            NetBIOS = $domain.Name.Split(".")[0].ToUpper()
         }
     } catch {
-        Write-Host " ERROR: $_" -ForegroundColor Red
-        $script:failed++
+        return $null
     }
 }
 
-# ================================================================
-# DOMAIN ROOT PERMISSIONS
-# ================================================================
+function Test-ServiceAccount([string]$SamName, [string]$DomainDn) {
+    try {
+        $entry    = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$DomainDn")
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher($entry)
+        $searcher.Filter = "(&(objectClass=user)(sAMAccountName=$SamName))"
+        $searcher.PropertiesToLoad.Add("distinguishedName") | Out-Null
+        $result = $searcher.FindOne()
+        if ($result) {
+            return $result.Properties["distinguishedname"][0]
+        }
+        return $null
+    } catch {
+        return $null
+    }
+}
+
+function Invoke-Dsacls {
+    param(
+        [string]$Target,
+        [string]$Account,
+        [string]$Rights,
+        [string]$Description,
+        [switch]$Silent
+    )
+    $cmd = "dsacls `"$Target`" /G `"${Account}:${Rights}`""
+    try {
+        $output = cmd /c $cmd 2>&1
+        $success = $LASTEXITCODE -eq 0 -or ($output -match "successfully")
+
+        if ($success) {
+            if (-not $Silent) { Write-OK $Description }
+            return $true
+        } else {
+            Write-Fail "$Description"
+            $errLine = ($output | Where-Object { $_ -match "error|fail|denied" } | Select-Object -First 1)
+            if ($errLine) { Write-Host "         $errLine" -ForegroundColor DarkYellow }
+            return $false
+        }
+    } catch {
+        Write-Fail "$Description - Exception: $_"
+        return $false
+    }
+}
+
+function Invoke-DsaclsInherit {
+    param(
+        [string]$Target,
+        [string]$Account,
+        [string]$InheritFlag,
+        [string]$Rights,
+        [string]$Description,
+        [switch]$Silent
+    )
+    $cmd = "dsacls `"$Target`" /I:$InheritFlag /G `"${Account}:${Rights}`""
+    try {
+        $output = cmd /c $cmd 2>&1
+        $success = $LASTEXITCODE -eq 0 -or ($output -match "successfully")
+
+        if ($success) {
+            if (-not $Silent) { Write-OK $Description }
+            return $true
+        } else {
+            Write-Fail "$Description"
+            $errLine = ($output | Where-Object { $_ -match "error|fail|denied|incorrect" } | Select-Object -First 1)
+            if ($errLine) { Write-Host "         $errLine" -ForegroundColor DarkYellow }
+            return $false
+        }
+    } catch {
+        Write-Fail "$Description - Exception: $_"
+        return $false
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════
+Clear-Host
+Write-Header "AD Manager Pro - Permission Setup v$Version"
+
+# ── Check Admin ──────────────────────────────────────────────
+if (-not (Test-Admin)) {
+    Write-Fail "This script must be run as Administrator (Domain Admin recommended)"
+    Read-Host "  Press Enter to exit"
+    exit 1
+}
+Write-OK "Running as Administrator"
+
+# ── Detect Domain ────────────────────────────────────────────
+Write-Section "Detecting Domain"
+$domainInfo = Get-DomainInfo
+if (-not $domainInfo) {
+    Write-Fail "Could not detect domain. Are you on a Domain Controller?"
+    Read-Host "  Press Enter to exit"
+    exit 1
+}
+Write-OK "Domain: $($domainInfo.Name)"
+Write-OK "Base DN: $($domainInfo.DN)"
+Write-OK "NetBIOS: $($domainInfo.NetBIOS)"
+
+# ── Get Service Account ──────────────────────────────────────
+Write-Section "Service Account"
+if (-not $ServiceAccount) {
+    Write-Host "  Enter the service account username (sAMAccountName)" -ForegroundColor Yellow
+    Write-Host "  Example: svc-admanager" -ForegroundColor DarkGray
+    $ServiceAccount = Read-Host "  Account"
+}
+
+if (-not $ServiceAccount) {
+    Write-Fail "Service account name is required"
+    exit 1
+}
+
+# Strip domain if user included it
+if ($ServiceAccount -match "@") { $ServiceAccount = $ServiceAccount.Split("@")[0] }
+if ($ServiceAccount -match "\\") { $ServiceAccount = $ServiceAccount.Split("\")[-1] }
+
+$accountDn = Test-ServiceAccount -SamName $ServiceAccount -DomainDn $domainInfo.DN
+if (-not $accountDn) {
+    Write-Fail "Service account '$ServiceAccount' not found in $($domainInfo.Name)"
+    Write-Info "Create it first with: New-ADUser -Name '$ServiceAccount' -SamAccountName '$ServiceAccount'"
+    Read-Host "  Press Enter to exit"
+    exit 1
+}
+Write-OK "Found: $accountDn"
+
+# ── Build account identifier for dsacls ──────────────────────
+$accountId = "$($domainInfo.NetBIOS)\$ServiceAccount"
+$baseDn    = $domainInfo.DN
+
+# ── Confirmation ─────────────────────────────────────────────
+Write-Section "Summary"
+Write-Info "Domain:          $($domainInfo.Name)"
+Write-Info "Base DN:         $baseDn"
+Write-Info "Service Account: $accountId"
+Write-Info "Account DN:      $accountDn"
 Write-Host ""
-Write-Host "  -- Domain Root Permissions --" -ForegroundColor Cyan
-
-# Generic Read on entire domain
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:GR`"" "Generic Read (entire domain)"
-
-# Read gPLink attribute for GPO link detection
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:RP;gPLink;`"" "Read GPO Links"
-
-# ================================================================
-# USER PERMISSIONS (inherited to all sub-OUs)
-# ================================================================
-Write-Host ""
-Write-Host "  -- User Permissions --" -ForegroundColor Cyan
-
-# Create and Delete user objects
-Run-Dsacls $domainDN "/I:T /G `"${fullAccount}:CC;user;`"" "Create User objects"
-Run-Dsacls $domainDN "/I:T /G `"${fullAccount}:DC;user;`"" "Delete Child users"
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:SD;;user`"" "Standard Delete users"
-
-# Write all user properties
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:WP;;user`"" "Write all user properties"
-
-# Password operations
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:CA;Reset Password;user`"" "Reset Password (extended right)"
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:WP;pwdLastSet;user`"" "Write pwdLastSet"
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:WP;unicodePwd;user`"" "Write unicodePwd"
-
-# Account control
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:WP;userAccountControl;user`"" "Write userAccountControl"
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:WP;lockoutTime;user`"" "Write lockoutTime (unlock)"
-
-# User photos
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:WP;thumbnailPhoto;user`"" "Write thumbnailPhoto"
-
-# ================================================================
-# GROUP PERMISSIONS
-# ================================================================
-Write-Host ""
-Write-Host "  -- Group Permissions --" -ForegroundColor Cyan
-
-# Create and Delete group objects
-Run-Dsacls $domainDN "/I:T /G `"${fullAccount}:CC;group;`"" "Create Group objects"
-Run-Dsacls $domainDN "/I:T /G `"${fullAccount}:DC;group;`"" "Delete Child groups"
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:SD;;group`"" "Standard Delete groups"
-
-# Group membership management
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:WP;member;group`"" "Write member attribute"
-
-# ================================================================
-# COMPUTER PERMISSIONS
-# ================================================================
-Write-Host ""
-Write-Host "  -- Computer Permissions --" -ForegroundColor Cyan
-
-# Create and Delete computer objects
-Run-Dsacls $domainDN "/I:T /G `"${fullAccount}:CC;computer;`"" "Create Computer objects"
-Run-Dsacls $domainDN "/I:T /G `"${fullAccount}:DC;computer;`"" "Delete Child computers"
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:SD;;computer`"" "Standard Delete computers"
-
-# Computer account control (enable/disable)
-Run-Dsacls $domainDN "/I:S /G `"${fullAccount}:WP;userAccountControl;computer`"" "Write computer UAC"
-
-# ================================================================
-# OU PERMISSIONS
-# ================================================================
-Write-Host ""
-Write-Host "  -- OU Permissions --" -ForegroundColor Cyan
-
-# Create and Delete OU objects
-Run-Dsacls $domainDN "/I:T /G `"${fullAccount}:CC;organizationalUnit;`"" "Create OU objects"
-Run-Dsacls $domainDN "/I:T /G `"${fullAccount}:DC;organizationalUnit;`"" "Delete Child OUs"
-
-# ================================================================
-# GPO READ PERMISSIONS
-# ================================================================
-Write-Host ""
-Write-Host "  -- GPO Permissions --" -ForegroundColor Cyan
-
-# Read System container
-Run-Dsacls "CN=System,$domainDN" "/I:T /G `"${fullAccount}:GR`"" "Read CN=System"
-
-# Read Policies container
-Run-Dsacls "CN=Policies,CN=System,$domainDN" "/I:T /G `"${fullAccount}:GR`"" "Read CN=Policies"
-
-# ================================================================
-# BUILTIN CONTAINERS (CN=Users, CN=Computers, CN=Builtin)
-# ================================================================
-Write-Host ""
-Write-Host "  -- Built-in Container Permissions --" -ForegroundColor Cyan
-
-# CN=Users container
-Run-Dsacls "CN=Users,$domainDN" "/I:S /G `"${fullAccount}:GR`"" "Read CN=Users"
-Run-Dsacls "CN=Users,$domainDN" "/I:T /G `"${fullAccount}:CC;user;`"" "Create users in CN=Users"
-Run-Dsacls "CN=Users,$domainDN" "/I:T /G `"${fullAccount}:DC;user;`"" "Delete users in CN=Users"
-Run-Dsacls "CN=Users,$domainDN" "/I:T /G `"${fullAccount}:CC;group;`"" "Create groups in CN=Users"
-Run-Dsacls "CN=Users,$domainDN" "/I:T /G `"${fullAccount}:DC;group;`"" "Delete groups in CN=Users"
-
-# CN=Computers container
-Run-Dsacls "CN=Computers,$domainDN" "/I:S /G `"${fullAccount}:GR`"" "Read CN=Computers"
-Run-Dsacls "CN=Computers,$domainDN" "/I:T /G `"${fullAccount}:CC;computer;`"" "Create computers in CN=Computers"
-Run-Dsacls "CN=Computers,$domainDN" "/I:T /G `"${fullAccount}:DC;computer;`"" "Delete computers in CN=Computers"
-
-# ================================================================
-# RESULTS
-# ================================================================
-Write-Host ""
-Write-Host "  ============================================" -ForegroundColor Cyan
-Write-Host "  Results" -ForegroundColor Cyan
-Write-Host "  ============================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  Successful : $success" -ForegroundColor Green
-Write-Host "  Failed     : $failed" -ForegroundColor Red
+Write-Warn "This will grant the service account extensive AD permissions."
+Write-Warn "These permissions allow full management of users, groups, computers,"
+Write-Warn "OUs, GPOs, and user photos across the entire domain."
 Write-Host ""
 
-if ($failed -eq 0) {
-    Write-Host "  ============================================" -ForegroundColor Green
-    Write-Host "   All Permissions Applied Successfully!" -ForegroundColor Green
-    Write-Host "  ============================================" -ForegroundColor Green
+if (-not $Quiet) {
+    $confirm = Read-Host "  Proceed? (yes/no)"
+    if ($confirm -ne "yes") {
+        Write-Info "Cancelled by user"
+        exit 0
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# APPLY PERMISSIONS
+# ═══════════════════════════════════════════════════════════════════
+$successCount = 0
+$failCount    = 0
+
+# ─────────────────────────────────────────────────────────────────
+# DOMAIN ROOT - Read Access
+# ─────────────────────────────────────────────────────────────────
+Write-Section "Domain Root - Read Access"
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "GR" `
+    -Description "Generic Read on entire domain") { $successCount++ } else { $failCount++ }
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "RP;gPLink" `
+    -Description "Read gPLink attribute (for GPO detection)") { $successCount++ } else { $failCount++ }
+
+# ─────────────────────────────────────────────────────────────────
+# USER OBJECTS - Full Management
+# ─────────────────────────────────────────────────────────────────
+Write-Section "User Objects - Full Management"
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "CC;user" `
+    -Description "Create user objects") { $successCount++ } else { $failCount++ }
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "DC;user" `
+    -Description "Delete user objects (from OUs)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "SD;;user" `
+    -Description "Standard delete on user objects") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;;user" `
+    -Description "Write all properties on user objects") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WD;;user" `
+    -Description "Write DACL on user objects (for renames/moves)") { $successCount++ } else { $failCount++ }
+
+# ─────────────────────────────────────────────────────────────────
+# USER OBJECTS - Specific Attributes (Password, Photo, Status)
+# ─────────────────────────────────────────────────────────────────
+Write-Section "User Objects - Sensitive Attributes"
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "CA;Reset Password;user" `
+    -Description "Reset Password extended right") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;pwdLastSet;user" `
+    -Description "Write pwdLastSet (force password change at logon)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;unicodePwd;user" `
+    -Description "Write unicodePwd (set passwords via LDAPS)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;userAccountControl;user" `
+    -Description "Write userAccountControl (enable/disable accounts)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;lockoutTime;user" `
+    -Description "Write lockoutTime (unlock user accounts)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;thumbnailPhoto;user" `
+    -Description "Write thumbnailPhoto (user photos)") { $successCount++ } else { $failCount++ }
+
+# ─────────────────────────────────────────────────────────────────
+# GROUP OBJECTS - Full Management
+# ─────────────────────────────────────────────────────────────────
+Write-Section "Group Objects - Full Management"
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "CC;group" `
+    -Description "Create group objects") { $successCount++ } else { $failCount++ }
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "DC;group" `
+    -Description "Delete group objects (from OUs)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "SD;;group" `
+    -Description "Standard delete on group objects") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;;group" `
+    -Description "Write all properties on group objects") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;member;group" `
+    -Description "Write member attribute (manage group membership)") { $successCount++ } else { $failCount++ }
+
+# ─────────────────────────────────────────────────────────────────
+# COMPUTER OBJECTS - Full Management (Fixed for Move Operations)
+# ─────────────────────────────────────────────────────────────────
+Write-Section "Computer Objects - Full Management"
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "CC;computer" `
+    -Description "Create computer objects") { $successCount++ } else { $failCount++ }
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "DC;computer" `
+    -Description "Delete computer objects (from OUs)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "SD;;computer" `
+    -Description "Standard delete on computer objects") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;;computer" `
+    -Description "Write all properties on computers (required for MOVE)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WD;;computer" `
+    -Description "Write DACL on computers (required for MOVE)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;userAccountControl;computer" `
+    -Description "Write userAccountControl (enable/disable computers)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;description;computer" `
+    -Description "Write description on computers") { $successCount++ } else { $failCount++ }
+
+# ─────────────────────────────────────────────────────────────────
+# ORGANIZATIONAL UNITS - Full Management
+# ─────────────────────────────────────────────────────────────────
+Write-Section "Organizational Units - Full Management"
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "CC;organizationalUnit" `
+    -Description "Create OU objects") { $successCount++ } else { $failCount++ }
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "DC;organizationalUnit" `
+    -Description "Delete OU objects") { $successCount++ } else { $failCount++ }
+
+if (Invoke-Dsacls -Target $baseDn -Account $accountId -Rights "SD;;organizationalUnit" `
+    -Description "Standard delete on OU objects") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;;organizationalUnit" `
+    -Description "Write all properties on OUs (for renames)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "WP;description;organizationalUnit" `
+    -Description "Write description on OUs") { $successCount++ } else { $failCount++ }
+
+# ─────────────────────────────────────────────────────────────────
+# CROSS-OU MOVES - Critical for Move Operations
+# ─────────────────────────────────────────────────────────────────
+Write-Section "Cross-OU Moves - Required for Move Operations"
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "CCDC;user;organizationalUnit" `
+    -Description "Create/Delete user children in any OU (for user MOVE)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "CCDC;computer;organizationalUnit" `
+    -Description "Create/Delete computer children in any OU (for computer MOVE)") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $baseDn -Account $accountId -InheritFlag "S" -Rights "CCDC;group;organizationalUnit" `
+    -Description "Create/Delete group children in any OU (for group MOVE)") { $successCount++ } else { $failCount++ }
+
+# ─────────────────────────────────────────────────────────────────
+# GPO CONTAINER - Read Access
+# ─────────────────────────────────────────────────────────────────
+Write-Section "Group Policy Objects - Read Access"
+
+$policiesDn = "CN=Policies,CN=System,$baseDn"
+$systemDn   = "CN=System,$baseDn"
+
+if (Invoke-DsaclsInherit -Target $systemDn -Account $accountId -InheritFlag "T" -Rights "GR" `
+    -Description "Generic Read on CN=System") { $successCount++ } else { $failCount++ }
+
+if (Invoke-DsaclsInherit -Target $policiesDn -Account $accountId -InheritFlag "T" -Rights "GR" `
+    -Description "Generic Read on CN=Policies (all GPOs)") { $successCount++ } else { $failCount++ }
+
+# ─────────────────────────────────────────────────────────────────
+# BUILT-IN CONTAINERS - Read/Write for Default Placements
+# ─────────────────────────────────────────────────────────────────
+Write-Section "Built-in Containers"
+
+$usersContainer     = "CN=Users,$baseDn"
+$computersContainer = "CN=Computers,$baseDn"
+
+if (Test-Path "AD:\$usersContainer") {
+    if (Invoke-DsaclsInherit -Target $usersContainer -Account $accountId -InheritFlag "T" -Rights "GR" `
+        -Description "Read CN=Users container") { $successCount++ } else { $failCount++ }
+
+    if (Invoke-Dsacls -Target $usersContainer -Account $accountId -Rights "CC;user" `
+        -Description "Create users in CN=Users") { $successCount++ } else { $failCount++ }
+
+    if (Invoke-Dsacls -Target $usersContainer -Account $accountId -Rights "DC;user" `
+        -Description "Delete users from CN=Users") { $successCount++ } else { $failCount++ }
 } else {
-    Write-Host "  ============================================" -ForegroundColor Yellow
-    Write-Host "   Some Permissions Failed" -ForegroundColor Yellow
-    Write-Host "  ============================================" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  Common causes:" -ForegroundColor White
-    Write-Host "    - Not running as Domain Admin" -ForegroundColor Gray
-    Write-Host "    - Service account name spelled wrong" -ForegroundColor Gray
-    Write-Host "    - RSAT tools not installed" -ForegroundColor Gray
-    Write-Host "    - Protected OUs with inheritance blocked" -ForegroundColor Gray
+    Write-Warn "CN=Users container not accessible via AD: drive - skipping"
+}
+
+if (Test-Path "AD:\$computersContainer") {
+    if (Invoke-DsaclsInherit -Target $computersContainer -Account $accountId -InheritFlag "T" -Rights "GR" `
+        -Description "Read CN=Computers container") { $successCount++ } else { $failCount++ }
+
+    if (Invoke-Dsacls -Target $computersContainer -Account $accountId -Rights "CC;computer" `
+        -Description "Create computers in CN=Computers") { $successCount++ } else { $failCount++ }
+
+    if (Invoke-Dsacls -Target $computersContainer -Account $accountId -Rights "DC;computer" `
+        -Description "Delete computers from CN=Computers") { $successCount++ } else { $failCount++ }
+} else {
+    Write-Warn "CN=Computers container not accessible via AD: drive - skipping"
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# SUMMARY
+# ═══════════════════════════════════════════════════════════════════
+Write-Header "Setup Complete"
+
+$total = $successCount + $failCount
+Write-Host "  Total operations: $total" -ForegroundColor Cyan
+Write-Host "  Successful:       $successCount" -ForegroundColor Green
+if ($failCount -gt 0) {
+    Write-Host "  Failed:           $failCount" -ForegroundColor Red
+} else {
+    Write-Host "  Failed:           $failCount" -ForegroundColor Gray
+}
+Write-Host ""
+
+# ─────────────────────────────────────────────────────────────────
+# Verification
+# ─────────────────────────────────────────────────────────────────
+Write-Section "Verifying Permissions"
+try {
+    $verifyOutput = cmd /c "dsacls `"$baseDn`"" 2>&1
+    $accountPerms = $verifyOutput | Select-String $ServiceAccount
+    Write-OK "Found $($accountPerms.Count) ACE entries for $ServiceAccount"
+    Write-Info "Run this to view details:"
+    Write-Host "        dsacls `"$baseDn`" | Select-String `"$ServiceAccount`"" -ForegroundColor DarkGray
+} catch {
+    Write-Warn "Verification query failed: $_"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# Post-Install Notes
+# ─────────────────────────────────────────────────────────────────
+Write-Section "Important Notes"
+Write-Info "LDAPS Required for Password Operations:"
+Write-Host "         Password resets require LDAP over SSL (port 636)." -ForegroundColor DarkGray
+Write-Host "         Install AD Certificate Services on this DC if not already done." -ForegroundColor DarkGray
+Write-Host ""
+Write-Info "Test the Configuration:"
+Write-Host "         1. Log into AD Manager Pro" -ForegroundColor DarkGray
+Write-Host "         2. Go to Settings > Active Directory > Test Connection" -ForegroundColor DarkGray
+Write-Host "         3. Try to create/edit a test user" -ForegroundColor DarkGray
+Write-Host "         4. Try to move a user or computer between OUs" -ForegroundColor DarkGray
+Write-Host ""
+Write-Info "Rollback (Remove All Permissions):"
+Write-Host "         dsacls `"$baseDn`" /R `"$accountId`"" -ForegroundColor DarkGray
+Write-Host ""
+
+if ($failCount -gt 0) {
+    Write-Warn "Some permissions failed. Review the errors above."
+    Write-Warn "Common causes: account not in Domain Admins during script execution,"
+    Write-Warn "or trying to modify protected system containers."
+} else {
+    Write-OK "All permissions applied successfully!"
 }
 
 Write-Host ""
-Write-Host "  The service account can now:" -ForegroundColor Cyan
-Write-Host "    - Create, read, update, delete Users" -ForegroundColor Gray
-Write-Host "    - Create, read, update, delete Groups" -ForegroundColor Gray
-Write-Host "    - Create, read, update, delete Computers" -ForegroundColor Gray
-Write-Host "    - Create, read, delete OUs" -ForegroundColor Gray
-Write-Host "    - Reset passwords and unlock accounts" -ForegroundColor Gray
-Write-Host "    - Enable/disable accounts" -ForegroundColor Gray
-Write-Host "    - Manage group memberships" -ForegroundColor Gray
-Write-Host "    - Upload/delete user photos" -ForegroundColor Gray
-Write-Host "    - View GPOs and GPO links" -ForegroundColor Gray
-Write-Host ""
-Write-Host "  IMPORTANT: Password operations (reset/change)" -ForegroundColor Yellow
-Write-Host "  require LDAPS (port 636) to be enabled on the DC." -ForegroundColor Yellow
-Write-Host ""
-
-Read-Host "  Press Enter to exit"
+if (-not $Quiet) {
+    Read-Host "  Press Enter to exit"
+}
